@@ -1,0 +1,1481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ecom Live Dashboard Pendency Trends</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #f4f7f5;
+  --panel: #ffffff;
+  --panel-2: #eef3ef;
+  --border: #dbe4de;
+  --text: #1a2420;
+  --text-dim: #667670;
+  --green: #1f9d5c;
+  --green-bright: #17b26a;
+  --green-dark: #0f6b3d;
+  --yellow: #e0a326;
+  --red: #d64541;
+  --blue: #2563eb;
+  --radius: 8px;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+}
+
+.mono { font-variant-numeric: tabular-nums; font-family: "SF Mono", Consolas, Menlo, monospace; }
+
+/* ---------- Header ---------- */
+header.topbar {
+  background: #ffffff;
+  border-bottom: 2px solid var(--green);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  box-shadow: 0 1px 3px rgba(16, 40, 26, 0.06);
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green-bright); box-shadow: 0 0 8px rgba(23,178,106,0.5); }
+.brand h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: 0.2px; color: var(--text); }
+.brand .sub { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+.header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.btn:hover { border-color: var(--green); background: #e4efe8; }
+.btn-primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #ffffff;
+  font-weight: 600;
+}
+.btn-primary:hover { background: var(--green-dark); }
+.btn-file { position: relative; overflow: hidden; }
+.btn-file input[type=file] {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+}
+.btn-mini {
+  background: transparent; border: 1px solid var(--border); color: var(--green-dark);
+  border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer;
+}
+.btn-mini:hover { border-color: var(--green); background: #eef7f1; }
+
+/* ---------- Tabs ---------- */
+.tabbar {
+  display: flex; gap: 6px;
+  background: #ffffff;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 14px 22px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--green-dark); border-bottom-color: var(--green); }
+
+.tab-panel { display: none; padding: 20px 24px 60px; }
+.tab-panel.active { display: block; }
+
+/* ---------- Status / errors ---------- */
+.status-banner {
+  display: none;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.status-info { border-color: var(--blue); color: #1d4ed8; background: #eaf1fe; }
+.status-success { border-color: var(--green); color: var(--green-dark); background: #e8f6ee; }
+.status-error { border-color: var(--red); color: #a5231f; background: #fdecec; }
+
+/* ---------- Filters ---------- */
+.filter-bar {
+  display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 2px rgba(16, 40, 26, 0.04);
+}
+.filter-item { display: flex; flex-direction: column; gap: 4px; min-width: 170px; }
+.filter-item label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+select, input[type=text], input[type=date] {
+  background: #ffffff;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 13px;
+  min-width: 160px;
+}
+select:focus, input:focus { outline: 2px solid var(--green); outline-offset: 1px; }
+
+.drawer-wrap { max-height: 0; overflow: hidden; transition: max-height .25s ease; }
+.drawer-wrap.open { max-height: 600px; }
+.drawer {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 14px 16px;
+  margin-top: -14px;
+  margin-bottom: 14px;
+}
+.filter-field { display: flex; flex-direction: column; gap: 4px; }
+.filter-field label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; }
+
+/* ---------- KPI cards ---------- */
+.kpi-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.kpi-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--green);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  min-width: 150px;
+  flex: 1;
+  box-shadow: 0 1px 2px rgba(16, 40, 26, 0.04);
+}
+.kpi-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+.kpi-value { font-size: 22px; font-weight: 700; margin-top: 4px; color: var(--text); }
+
+/* ---------- Bucket sections ---------- */
+.bucket-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 2px rgba(16, 40, 26, 0.04);
+}
+.bucket-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.bucket-head h3 { margin: 0; font-size: 15px; letter-spacing: 0.3px; color: var(--text); }
+.bucket-count {
+  background: #e4f5eb;
+  color: var(--green-dark);
+  border: 1px solid var(--green);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.chart-box { height: 260px; margin-bottom: 14px; }
+
+.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+table.pivot-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.pivot-table th, table.pivot-table td {
+  padding: 7px 12px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+table.pivot-table th { background: var(--panel-2); color: var(--text-dim); font-weight: 600; text-align: right; }
+table.pivot-table th.sticky-col, table.pivot-table td.sticky-col {
+  text-align: left; position: sticky; left: 0; background: #ffffff; z-index: 1;
+}
+table.pivot-table tbody tr:hover td { background: #f0f8f3; }
+table.pivot-table tfoot td {
+  font-weight: 700; color: var(--green-dark); background: #e8f6ee; border-top: 2px solid var(--green);
+}
+table.pivot-table tfoot td.sticky-col { background: #e8f6ee; }
+
+/* ---------- Empty state ---------- */
+.empty-state {
+  text-align: center; padding: 70px 20px; color: var(--text-dim);
+  border: 1px dashed var(--border); border-radius: var(--radius); background: var(--panel);
+}
+.empty-icon { font-size: 34px; color: var(--green); margin-bottom: 8px; }
+.empty-state h3 { color: var(--text); margin: 6px 0; }
+
+/* ---------- Uploaded files ---------- */
+.uploads-panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 16px; margin-bottom: 18px;
+}
+.uploads-panel summary { cursor: pointer; font-weight: 600; color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+.upload-row {
+  display: grid; grid-template-columns: 100px 1fr 90px 90px; gap: 10px; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.upload-row:last-child { border-bottom: none; }
+.upload-date { color: var(--green-dark); font-weight: 600; }
+.upload-file { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-count { color: var(--text-dim); text-align: right; }
+.muted { color: var(--text-dim); font-size: 12px; }
+
+/* ---------- Modal ---------- */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(20, 30, 24, 0.45);
+  align-items: center; justify-content: center; z-index: 50;
+}
+.modal-overlay.open { display: flex; }
+.modal-box {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 22px; width: 360px;
+  box-shadow: 0 8px 24px rgba(16, 40, 26, 0.15);
+}
+.modal-box h4 { margin-top: 0; color: var(--text); }
+.modal-box p { color: var(--text-dim); font-size: 13px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+
+footer.foot { text-align: center; color: var(--text-dim); font-size: 12px; padding: 20px; }
+
+/* ---------- API settings bar ---------- */
+.api-bar {
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 24px;
+}
+.api-bar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.api-bar-row label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+.api-bar-row input[type=text] { flex: 1; min-width: 260px; }
+.btn-mini-primary {
+  background: var(--green); color: #fff; border: 1px solid var(--green);
+  border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer; font-weight: 600;
+}
+.btn-mini-primary:hover { background: var(--green-dark); }
+.api-status-row { margin-top: 6px; font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+.api-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.api-dot-ok { background: var(--green-bright); }
+.api-dot-bad { background: var(--red); }
+.api-dot-muted { background: var(--text-dim); }
+
+@media (max-width: 720px) {
+  .filter-bar { flex-direction: column; align-items: stretch; }
+  .filter-item { min-width: 0; }
+  .upload-row { grid-template-columns: 80px 1fr 70px; }
+  .upload-count { display: none; }
+}
+
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <div>
+      <h1>Ecom Live Dashboard Pendency Trends</h1>
+      <div class="sub">Forward &amp; Reverse floor pendency, day-on-day</div>
+    </div>
+  </div>
+  <div class="header-actions">
+    <label class="btn btn-file">Upload Forward Base
+      <input type="file" id="file-input-Forward" accept=".csv,.xlsx,.xls">
+    </label>
+    <label class="btn btn-file">Upload Reverse Base
+      <input type="file" id="file-input-Reverse" accept=".csv,.xlsx,.xls">
+    </label>
+    <button class="btn btn-primary" id="download-master-btn">Download Master Data</button>
+    <label class="btn btn-file">Load Master Data
+      <input type="file" id="load-master-input" accept=".csv">
+    </label>
+  </div>
+</header>
+
+<div class="api-bar">
+  <div class="api-bar-row">
+    <label for="api-url-input">Apps Script Web App URL</label>
+    <input type="text" id="api-url-input" placeholder="https://script.google.com/macros/s/XXXXX/exec">
+    <button class="btn btn-mini-primary" id="api-url-save">Save &amp; Connect</button>
+  </div>
+  <div class="api-status-row" id="api-status"></div>
+</div>
+
+<nav class="tabbar">
+  <button class="tab-btn active" data-tab="Forward">FWD PENDENCY</button>
+  <button class="tab-btn" data-tab="Reverse">REV PENDENCY</button>
+</nav>
+
+<!-- ============================ FORWARD PANEL ============================ -->
+<section class="tab-panel active" id="panel-Forward">
+  <div class="status-banner" id="status-Forward"></div>
+
+  <div class="filter-bar">
+    <div class="filter-item">
+      <label>Pivot</label>
+      <select id="filter-pivot-Forward"></select>
+    </div>
+    <div class="filter-item">
+      <label>Aging After Bag Received</label>
+      <select id="filter-aging-Forward"></select>
+    </div>
+    <div class="filter-item">
+      <label>Location Name</label>
+      <select id="filter-location-Forward"></select>
+    </div>
+    <button class="btn" id="more-filters-btn-Forward" type="button">Select More Filters ▸</button>
+    <button class="btn" id="clear-filters-Forward" type="button">Clear Filters</button>
+  </div>
+  <div class="drawer-wrap" id="drawer-wrap-Forward">
+    <div class="drawer" id="drawer-Forward"></div>
+  </div>
+
+  <div class="kpi-row" id="kpi-Forward"></div>
+
+  <div class="bucket-card" id="pivot-summary-Forward"></div>
+
+  <details class="uploads-panel">
+    <summary>Uploaded Forward Files (this session)</summary>
+    <div id="uploads-Forward" style="margin-top:10px;"></div>
+  </details>
+
+  <div id="sections-Forward"></div>
+</section>
+
+<!-- ============================ REVERSE PANEL ============================ -->
+<section class="tab-panel" id="panel-Reverse">
+  <div class="status-banner" id="status-Reverse"></div>
+
+  <div class="filter-bar">
+    <div class="filter-item">
+      <label>Pivot</label>
+      <select id="filter-pivot-Reverse"></select>
+    </div>
+    <div class="filter-item">
+      <label>Aging After Bag Received</label>
+      <select id="filter-aging-Reverse"></select>
+    </div>
+    <div class="filter-item">
+      <label>Location Name</label>
+      <select id="filter-location-Reverse"></select>
+    </div>
+    <button class="btn" id="more-filters-btn-Reverse" type="button">Select More Filters ▸</button>
+    <button class="btn" id="clear-filters-Reverse" type="button">Clear Filters</button>
+  </div>
+  <div class="drawer-wrap" id="drawer-wrap-Reverse">
+    <div class="drawer" id="drawer-Reverse"></div>
+  </div>
+
+  <div class="kpi-row" id="kpi-Reverse"></div>
+
+  <div class="bucket-card" id="pivot-summary-Reverse"></div>
+
+  <details class="uploads-panel">
+    <summary>Uploaded Reverse Files (this session)</summary>
+    <div id="uploads-Reverse" style="margin-top:10px;"></div>
+  </details>
+
+  <div id="sections-Reverse"></div>
+</section>
+
+<footer class="foot">Ecom Live Dashboard Pendency Trends &middot; raw files are processed locally in your browser &middot; only the reduced pendency records are sent to your configured Google Sheets backend</footer>
+
+<!-- Date-confirmation modal (shown when the base date can't be read from the filename) -->
+<div class="modal-overlay" id="date-modal">
+  <div class="modal-box">
+    <h4>Confirm base date</h4>
+    <p>Couldn't read a date from <strong id="date-modal-filename"></strong>. Please enter the base date for this file.</p>
+    <input type="hidden" id="date-modal-direction">
+    <input type="date" id="date-modal-input" style="width:100%;">
+    <div class="modal-actions">
+      <button class="btn" id="date-modal-cancel">Cancel</button>
+      <button class="btn btn-primary" id="date-modal-confirm">Use this date</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================================
+   Ecom Live Dashboard Pendency Trends — client
+   ----------------------------------------------------------------------------
+   Data flow:
+     1. User uploads a raw base CSV/XLSX. It is parsed and reduced entirely in
+        the browser (category filter -> pivot -> ageing -> base_date), exactly
+        as before. Raw AWB-level data never needs to leave the browser except
+        to be sent to the configured Apps Script API for persistence.
+     2. If an API URL is configured (Settings), the processed records for that
+        base_date are POSTed to the API (`uploadBase`), which stores them and
+        recomputes the permanent trend summary for that date.
+     3. Charts/tables are driven by aggregated "trend rows"
+        ({base_date, pivot, aging_after_bag_received, count}) — never by
+        downloading full raw AWB data. When the API is configured these come
+        from `getTrend`; when it isn't, they're computed locally from the
+        current browser session's uploads so the dashboard still works
+        exactly as before without any backend configured.
+     4. All base_date values are plain "YYYY-MM-DD" strings end-to-end. They
+        are never passed through `new Date(dateString)` for chart labels or
+        sorting — ISO strings sort correctly lexicographically, and display
+        formatting is done by splitting the string into numeric parts
+        ourselves (see fmtDisplayDate). This sidesteps the whole class of
+        locale/timezone parsing bugs that cause "invisible" or shifted charts.
+   ========================================================================= */
+
+const MONTHS = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Columns retained from the raw base (per Filters Format file), in export order.
+const RAW_COLUMNS = [
+  'awb_number','category','location_name','region','aging_bucket','manifest_code',
+  'shipment_type','item_status_text','seal_number','manifest_status_text',
+  'manifest_origin_name','manifest_origin_type','manifest_destination_name',
+  'manifest_destination_type','client_name','client_category','item_last_updated','order_type'
+];
+const INTERNAL_ONLY_COLUMNS = ['manifest_received_time_ist'];
+const REQUIRED_RAW_COLUMNS = RAW_COLUMNS.concat(INTERNAL_ONLY_COLUMNS);
+
+const PIVOTS = {
+  Forward: ['BRSNR', 'FMODC Short', 'FWD DC-DC Short'],
+  Reverse: ['BRSNR', 'LMODC Short', 'REV DC-DC Short']
+};
+const AGE_RANGE = { Forward: [3, 15], Reverse: [2, 20] };
+const CATEGORY_FILTER = 'IN BAG / BRSNR';
+
+// Dimensions aggregated into the permanent trend summary server-side.
+// seal_number is intentionally excluded (near-unique per shipment — see
+// Code.gs for the full rationale) so it's flagged specially in the UI.
+const TREND_FILTER_DIMENSIONS = [
+  'region', 'manifest_code', 'shipment_type', 'item_status_text',
+  'manifest_status_text', 'manifest_origin_name', 'manifest_origin_type',
+  'manifest_destination_name', 'manifest_destination_type', 'client_name',
+  'client_category', 'order_type'
+];
+
+// Fields shown in the "Select more filters" drawer (order matters).
+const DRAWER_FIELDS = [
+  { key: 'region', label: 'Region' },
+  { key: 'manifest_code', label: 'Manifest Code' },
+  { key: 'shipment_type', label: 'Shipment Type' },
+  { key: 'item_status_text', label: 'Item Status' },
+  { key: 'seal_number', label: 'Seal Number (recent data only)' },
+  { key: 'manifest_status_text', label: 'Manifest Status' },
+  { key: 'manifest_origin_name', label: 'Manifest Origin' },
+  { key: 'manifest_origin_type', label: 'Origin Type' },
+  { key: 'manifest_destination_name', label: 'Manifest Destination' },
+  { key: 'manifest_destination_type', label: 'Destination Type' },
+  { key: 'client_name', label: 'Client Name' },
+  { key: 'client_category', label: 'Client Category' },
+  { key: 'order_type', label: 'Order Type' }
+];
+
+const EXPORT_COLUMNS = ['awb_number', 'base_date', 'direction', 'pivot', 'aging_after_bag_received']
+  .concat(RAW_COLUMNS.filter(c => c !== 'awb_number'));
+
+/* ---------------------------- STATE ------------------------------------ */
+
+const state = {
+  apiUrl: '',
+  apiStatus: 'unconfigured', // unconfigured | checking | connected | error
+  apiStatusMessage: '',
+
+  // Trend rows actually being rendered right now: [{base_date, pivot, aging_after_bag_received, count}]
+  trends: { Forward: [], Reverse: [] },
+  // Unfiltered aggregate KPIs (dates covered / latest date / totals), independent of the active filter selection.
+  summary: { Forward: null, Reverse: null },
+  // Unique filter option values, sourced from full trend history (or local session data if API isn't configured).
+  filterOptions: { Forward: {}, Reverse: {} },
+
+  // Raw AWB-level records processed in this browser session. This is the
+  // source of truth when no API is configured, and is also used for instant
+  // Master Data Download without an extra round trip when the API IS configured.
+  localRaw: { Forward: [], Reverse: [] },
+  uploads: { Forward: [], Reverse: [] }, // { baseDate, count, totalRows, uploadedAt, fileName }
+
+  filters: {
+    Forward: { pivot: 'All', aging_after_bag_received: 'All', location_name: 'All', awb_search: '' },
+    Reverse: { pivot: 'All', aging_after_bag_received: 'All', location_name: 'All', awb_search: '' }
+  },
+  drawerOpen: { Forward: false, Reverse: false },
+  charts: {}
+};
+
+let pendingUpload = null;
+
+/* ---------------------------- UTILITIES --------------------------------- */
+
+function normVal(x) {
+  if (x === undefined || x === null) return '';
+  const s = String(x).trim();
+  if (s === '\\N' || s === 'NULL' || s === 'null') return '';
+  return s;
+}
+
+// Extracts a base date from a filename like "Fbase_pendency_16_july.csv",
+// "Fbase_pendency_16th_july.csv", "Fbase_pendency_16-July-2026.csv", etc.
+// Tolerates ordinal suffixes (1st/2nd/3rd/4th...) after the day number.
+function extractDateFromFilename(name, currentYear) {
+  const m = name.toLowerCase().match(/(\d{1,2})(?:st|nd|rd|th)?[\s_\-]*([a-z]{3,9})[\s_\-]*(\d{2,4})?/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10);
+  const monKey = m[2].slice(0, 3);
+  if (!(monKey in MONTHS)) return null;
+  let year = m[3] ? parseInt(m[3], 10) : currentYear;
+  if (year < 100) year += 2000;
+  const month = MONTHS[monKey];
+  const dt = new Date(year, month, day);
+  if (dt.getMonth() !== month || dt.getDate() !== day) return null;
+  const mm = String(month + 1).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return `${year}-${mm}-${dd}`;
+}
+
+// Formats a "YYYY-MM-DD" string as "16-Jul" for display, WITHOUT ever
+// constructing a Date from a parsed string (only from the numeric parts we
+// split out ourselves — safe, no locale/timezone ambiguity).
+function fmtDisplayDate(isoDateStr) {
+  if (!isoDateStr || typeof isoDateStr !== 'string') return isoDateStr || '';
+  const parts = isoDateStr.split('-');
+  if (parts.length !== 3) return isoDateStr;
+  const day = parseInt(parts[2], 10);
+  const monIdx = parseInt(parts[1], 10) - 1;
+  if (isNaN(day) || monIdx < 0 || monIdx > 11) return isoDateStr;
+  return `${day}-${MONTH_ABBR[monIdx]}`;
+}
+
+// Calendar-day difference (not 24-hour periods): if a bag is received any
+// time before midnight, the very next calendar date is Day 1. Both dates
+// are compared as local midnight Date objects built from numeric
+// components only — never from parsing a formatted string.
+function calendarDayDiff(baseDateStr, isoTimestampStr) {
+  const ts = normVal(isoTimestampStr);
+  if (!ts || ts.length < 10) return null;
+  const datePart = ts.slice(0, 10); // "YYYY-MM-DD" prefix of the timestamp
+  const d1 = isoToLocalMidnight(baseDateStr);
+  const d2 = isoToLocalMidnight(datePart);
+  if (!d1 || !d2) return null;
+  const diffDays = Math.round((d1 - d2) / 86400000);
+  return diffDays;
+}
+
+// Builds a local-midnight Date from a "YYYY-MM-DD" string using only its
+// numeric parts (never `new Date(str)`, which is locale/timezone-dependent).
+function isoToLocalMidnight(isoDateStr) {
+  const s = normVal(isoDateStr);
+  if (!/^\d{4}-\d{2}-\d{2}/.test(s)) return null;
+  const y = parseInt(s.slice(0, 4), 10);
+  const m = parseInt(s.slice(5, 7), 10) - 1;
+  const d = parseInt(s.slice(8, 10), 10);
+  const dt = new Date(y, m, d);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
+function computeForwardPivot(row) {
+  const st = normVal(row.manifest_status_text);
+  const ot = normVal(row.manifest_origin_type).toLowerCase();
+  const dt = normVal(row.manifest_destination_type).toLowerCase();
+  if (dt !== 'dc') return null;
+  if (st === 'Received at DC' && (ot === 'dc' || ot === 'hub')) return 'BRSNR';
+  if (st === 'Partially Closed' && ot === 'hub') return 'FMODC Short';
+  if (st === 'Partially Closed' && ot === 'dc') return 'FWD DC-DC Short';
+  return null;
+}
+
+function computeReversePivot(row) {
+  const st = normVal(row.manifest_status_text);
+  const ot = normVal(row.manifest_origin_type).toLowerCase();
+  const dt = normVal(row.manifest_destination_type).toLowerCase();
+  if (dt !== 'dc') return null;
+  if (st === 'Received at DC' && (ot === 'dc' || ot === 'hub')) return 'BRSNR';
+  if (st === 'Partially Closed' && ot === 'hub') return 'LMODC Short';
+  if (st === 'Partially Closed' && ot === 'dc') return 'REV DC-DC Short';
+  return null;
+}
+
+function processRow(direction, baseDate, row) {
+  if (normVal(row.category) !== CATEGORY_FILTER) return null;
+  const pivotVal = direction === 'Forward' ? computeForwardPivot(row) : computeReversePivot(row);
+  if (!pivotVal) return null;
+  const ageing = calendarDayDiff(baseDate, row.manifest_received_time_ist);
+  if (ageing === null) return null;
+  const range = AGE_RANGE[direction];
+  if (ageing < range[0] || ageing > range[1]) return null;
+
+  const rec = {};
+  RAW_COLUMNS.forEach(c => { rec[c] = normVal(row[c]); });
+  rec.pivot = pivotVal;
+  rec.aging_after_bag_received = ageing;
+  rec.base_date = baseDate;
+  rec.direction = direction;
+  return rec;
+}
+
+function validateColumns(fields) {
+  const have = new Set((fields || []).map(f => (f || '').trim()));
+  return REQUIRED_RAW_COLUMNS.filter(c => !have.has(c));
+}
+
+function uniqueSorted(arr, field) {
+  return Array.from(new Set(arr.map(r => r[field]).filter(v => v !== undefined && v !== ''))).sort();
+}
+
+function fmtInt(n) { return n.toLocaleString('en-IN'); }
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+/* ---------------------------- API LAYER ---------------------------------- */
+
+// Pre-filled so the dashboard connects to your deployed Apps Script Web App
+// out of the box. Overridden by whatever the person saves via the Settings
+// bar (stored in localStorage), so this only matters on first open / after
+// clearing browser storage. Update this if you redeploy to a new URL.
+const DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbwqUEMiK4ChAWqGMmJlPGyQz8ewpArNLU9KcXNSYlq9pqeVk-OrXGryP-NTuBLrhGQAZQ/exec';
+
+function loadApiUrlFromStorage() {
+  try {
+    const saved = localStorage.getItem('ecomDashboard.apiUrl');
+    return saved !== null ? saved : DEFAULT_API_URL;
+  } catch (e) {
+    return DEFAULT_API_URL;
+  }
+}
+function saveApiUrlToStorage(url) {
+  try { localStorage.setItem('ecomDashboard.apiUrl', url); } catch (e) { /* ignore (private browsing etc.) */ }
+}
+
+function apiConfigured() {
+  return !!state.apiUrl;
+}
+
+async function apiGet(action, params) {
+  const usp = new URLSearchParams(Object.assign({ action }, params || {}));
+  const res = await fetch(state.apiUrl + '?' + usp.toString(), { method: 'GET' });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'API request failed.');
+  return json.data;
+}
+
+async function apiPost(action, payload) {
+  // Content-Type: text/plain avoids a CORS preflight (OPTIONS) request,
+  // which Apps Script Web Apps do not answer natively.
+  const res = await fetch(state.apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, payload))
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'API request failed.');
+  return json.data;
+}
+
+async function pingApi() {
+  if (!state.apiUrl) { state.apiStatus = 'unconfigured'; state.apiStatusMessage = ''; renderApiStatus(); return; }
+  state.apiStatus = 'checking'; state.apiStatusMessage = 'Checking connection...'; renderApiStatus();
+  try {
+    await apiGet('ping', {});
+    state.apiStatus = 'connected'; state.apiStatusMessage = 'Connected to Google Sheets backend.';
+  } catch (err) {
+    state.apiStatus = 'error'; state.apiStatusMessage = 'Could not reach API: ' + err.message;
+  }
+  renderApiStatus();
+}
+
+function renderApiStatus() {
+  const el = document.getElementById('api-status');
+  if (!el) return;
+  const dotClass = { unconfigured: 'muted', checking: 'muted', connected: 'ok', error: 'bad' }[state.apiStatus] || 'muted';
+  const label = {
+    unconfigured: 'No API configured — running in local-only mode (data resets on reload).',
+    checking: 'Checking connection…',
+    connected: 'Connected — data is stored in Google Sheets.',
+    error: state.apiStatusMessage
+  }[state.apiStatus];
+  el.innerHTML = `<span class="api-dot api-dot-${dotClass}"></span><span>${escapeHtml(label)}</span>`;
+}
+
+/* ---------------------------- TREND AGGREGATION (shared shape) ------------ */
+
+// Produces the SAME row shape the API's getTrend returns
+// ({base_date, pivot, aging_after_bag_received, count}), from an array of
+// raw processed records, applying the given active filters. Used for
+// local-only mode (no API configured) so the rendering code never has to
+// know whether its input came from the network or from this session.
+function aggregateLocalTrend(records, activeFilters) {
+  const grouped = {};
+  records.forEach(r => {
+    for (const dim in activeFilters) {
+      const val = activeFilters[dim];
+      if (val === undefined || val === '' || val === 'All') continue;
+      const rowVal = String(r[dim] || '');
+      if (rowVal !== String(val)) return;
+    }
+    const key = r.base_date + '|' + r.pivot + '|' + r.aging_after_bag_received;
+    if (!grouped[key]) grouped[key] = { base_date: r.base_date, pivot: r.pivot, aging_after_bag_received: r.aging_after_bag_received, count: 0 };
+    grouped[key].count += 1;
+  });
+  return Object.values(grouped);
+}
+
+function activeFilterParams(direction) {
+  const f = state.filters[direction];
+  const params = {};
+  if (f.pivot && f.pivot !== 'All') params.pivot = f.pivot;
+  if (f.aging_after_bag_received && f.aging_after_bag_received !== 'All') params.aging_after_bag_received = f.aging_after_bag_received;
+  if (f.location_name && f.location_name !== 'All') params.location_name = f.location_name;
+  DRAWER_FIELDS.forEach(df => {
+    const v = f[df.key];
+    if (v && v !== 'All') params[df.key] = v;
+  });
+  return params;
+}
+
+// Refreshes state.trends[direction] from whichever source is active.
+async function refreshTrendData(direction) {
+  const params = activeFilterParams(direction);
+  if (apiConfigured()) {
+    const data = await apiGet('getTrend', Object.assign({ direction }, params));
+    state.trends[direction] = data.rows;
+  } else {
+    state.trends[direction] = aggregateLocalTrend(state.localRaw[direction], params);
+  }
+}
+
+// Refreshes filter dropdown options + unfiltered summary KPIs. Cheaper to
+// call only on init and after an upload, not on every filter change.
+async function refreshFilterOptionsAndSummary(direction) {
+  if (apiConfigured()) {
+    try {
+      const [filters, summary] = await Promise.all([
+        apiGet('getFilters', { direction }),
+        apiGet('getSummary', { direction })
+      ]);
+      state.filterOptions[direction] = filters;
+      state.summary[direction] = summary;
+    } catch (err) {
+      // Deliberately not calling setStatus here: this can run right after
+      // finishUpload has already set a more specific, more important status
+      // message (e.g. "Saved locally, but could not sync..."), and this
+      // secondary failure shouldn't stomp on it. Connectivity problems are
+      // already visible via the dedicated API status bar (pingApi/renderApiStatus).
+      console.error('Could not load filters/summary for ' + direction + ':', err);
+    }
+  } else {
+    const opts = {};
+    ['location_name'].concat(DRAWER_FIELDS.map(f => f.key)).forEach(dim => {
+      opts[dim] = uniqueSorted(state.localRaw[direction], dim);
+    });
+    state.filterOptions[direction] = opts;
+    const dates = uniqueSorted(state.localRaw[direction], 'base_date');
+    state.summary[direction] = {
+      totalPendencyRecords: state.localRaw[direction].length,
+      datesCovered: dates.length,
+      earliestBaseDate: dates.length ? dates[0] : null,
+      latestBaseDate: dates.length ? dates[dates.length - 1] : null,
+      ageRange: AGE_RANGE[direction]
+    };
+  }
+}
+
+/* ---------------------------- INGESTION --------------------------------- */
+
+function commitLocalBuffer(direction, baseDate, buffer, totalRows, fileName) {
+  state.localRaw[direction] = state.localRaw[direction].filter(r => r.base_date !== baseDate).concat(buffer);
+  state.uploads[direction] = state.uploads[direction].filter(u => u.baseDate !== baseDate);
+  state.uploads[direction].push({
+    baseDate, count: buffer.length, totalRows, uploadedAt: new Date().toISOString(), fileName
+  });
+  state.uploads[direction].sort((a, b) => a.baseDate.localeCompare(b.baseDate));
+}
+
+function parseCSVFile(direction, baseDate, file, callbacks) {
+  let buffer = [];
+  let rowCount = 0;
+  let missingCols = null;
+  let checkedHeader = false;
+
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    worker: false,
+    chunkSize: 1024 * 1024 * 4,
+    step: function (results, parser) {
+      if (!checkedHeader) {
+        checkedHeader = true;
+        missingCols = validateColumns(results.meta.fields);
+        if (missingCols.length) { parser.abort(); return; }
+      }
+      rowCount++;
+      const rec = processRow(direction, baseDate, results.data);
+      if (rec) buffer.push(rec);
+      if (rowCount % 25000 === 0 && callbacks.onProgress) callbacks.onProgress(rowCount);
+    },
+    complete: function () {
+      if (missingCols && missingCols.length) {
+        callbacks.onError(`Missing required columns: ${missingCols.join(', ')}`);
+        return;
+      }
+      callbacks.onComplete(buffer, rowCount);
+    },
+    error: function (err) {
+      callbacks.onError(err.message || String(err));
+    }
+  });
+}
+
+function parseExcelFile(direction, baseDate, file, callbacks) {
+  const reader = new FileReader();
+  reader.onload = function (e) {
+    try {
+      const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+      if (!rows.length) { callbacks.onError('No rows found in file.'); return; }
+      const missingCols = validateColumns(Object.keys(rows[0]));
+      if (missingCols.length) {
+        callbacks.onError(`Missing required columns: ${missingCols.join(', ')}`);
+        return;
+      }
+      let buffer = [];
+      let i = 0;
+      function processChunk() {
+        const end = Math.min(i + 5000, rows.length);
+        for (; i < end; i++) {
+          const rec = processRow(direction, baseDate, rows[i]);
+          if (rec) buffer.push(rec);
+        }
+        if (callbacks.onProgress) callbacks.onProgress(i);
+        if (i < rows.length) {
+          setTimeout(processChunk, 0);
+        } else {
+          callbacks.onComplete(buffer, rows.length);
+        }
+      }
+      processChunk();
+    } catch (err) {
+      callbacks.onError(err.message || String(err));
+    }
+  };
+  reader.onerror = function () { callbacks.onError('Could not read file.'); };
+  reader.readAsArrayBuffer(file);
+}
+
+function handleRawUpload(direction, file, dateOverride, callbacks) {
+  const currentYear = new Date().getFullYear();
+  const baseDate = dateOverride || extractDateFromFilename(file.name, currentYear);
+  if (!baseDate) {
+    callbacks.onNeedDate();
+    return;
+  }
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith('.csv')) {
+    parseCSVFile(direction, baseDate, file, { ...callbacks, baseDate });
+  } else if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
+    parseExcelFile(direction, baseDate, file, { ...callbacks, baseDate });
+  } else {
+    callbacks.onError('Unsupported file type. Please upload a .csv, .xlsx, or .xls file.');
+  }
+}
+
+function downloadCSV(filename, rows) {
+  const csv = Papa.unparse(rows, { columns: EXPORT_COLUMNS });
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const urlObj = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = urlObj; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(urlObj);
+}
+
+function handleMasterDataLoad(file, callbacks) {
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: function (results) {
+      const byKey = {};
+      results.data.forEach(row => {
+        const direction = row.direction === 'Reverse' ? 'Reverse' : 'Forward';
+        const baseDate = normVal(row.base_date);
+        if (!baseDate) return;
+        const key = direction + '|' + baseDate;
+        if (!byKey[key]) byKey[key] = [];
+        const rec = {};
+        RAW_COLUMNS.forEach(c => { rec[c] = normVal(row[c]); });
+        rec.pivot = normVal(row.pivot);
+        rec.aging_after_bag_received = parseInt(row.aging_after_bag_received, 10);
+        rec.base_date = baseDate;
+        rec.direction = direction;
+        byKey[key].push(rec);
+      });
+      let addedDates = 0;
+      Object.keys(byKey).forEach(key => {
+        const [direction, baseDate] = key.split('|');
+        const alreadyHave = state.uploads[direction].some(u => u.baseDate === baseDate);
+        if (alreadyHave) return;
+        const buffer = byKey[key];
+        commitLocalBuffer(direction, baseDate, buffer, buffer.length, file.name + ' (restored, local only)');
+        addedDates++;
+      });
+      callbacks.onComplete(addedDates);
+    },
+    error: function (err) { callbacks.onError(err.message || String(err)); }
+  });
+}
+
+/* ---------------------------- FILTERING (local raw fallback) ------------- */
+
+function applyLocalFilters(direction) {
+  const f = state.filters[direction];
+  return state.localRaw[direction].filter(r => {
+    if (f.pivot && f.pivot !== 'All' && r.pivot !== f.pivot) return false;
+    if (f.aging_after_bag_received && f.aging_after_bag_received !== 'All' &&
+        String(r.aging_after_bag_received) !== String(f.aging_after_bag_received)) return false;
+    if (f.location_name && f.location_name !== 'All' && r.location_name !== f.location_name) return false;
+    if (f.awb_search && f.awb_search.trim()) {
+      if (!r.awb_number.toLowerCase().includes(f.awb_search.trim().toLowerCase())) return false;
+    }
+    for (const df of DRAWER_FIELDS) {
+      const v = f[df.key];
+      if (v && v !== 'All' && r[df.key] !== v) return false;
+    }
+    return true;
+  });
+}
+
+/* ---------------------------- RENDERING --------------------------------- */
+
+function emptyStateHTML(direction) {
+  return `<div class="empty-state">
+    <div class="empty-icon">${direction === 'Forward' ? '&#8594;' : '&#8592;'}</div>
+    <h3>No ${direction} Data Available</h3>
+    <p>Upload a ${direction} base file to see pendency trends here.</p>
+  </div>`;
+}
+
+function chartColor(idx) {
+  const palette = ['#17b26a', '#d97706', '#2563eb', '#c53a2e', '#8b5cf6', '#0e9488'];
+  return palette[idx % palette.length];
+}
+
+function buildSectionDOM(direction, bucket) {
+  const wrap = document.createElement('div');
+  wrap.className = 'bucket-card';
+  const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
+  wrap.innerHTML = `
+    <div class="bucket-head">
+      <h3>${escapeHtml(bucket)}</h3>
+      <span class="bucket-count" id="count-${safeId}">0</span>
+    </div>
+    <div class="chart-box"><canvas id="chart-${safeId}"></canvas></div>
+    <div class="table-scroll"><table class="pivot-table" id="table-${safeId}"></table></div>
+  `;
+  return wrap;
+}
+
+function renderChart(direction, bucket, bucketTrendRows, allDates) {
+  const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
+  const canvas = document.getElementById('chart-' + safeId);
+  if (!canvas) return;
+  const countsByDate = {};
+  allDates.forEach(d => countsByDate[d] = 0);
+  bucketTrendRows.forEach(r => { countsByDate[r.base_date] = (countsByDate[r.base_date] || 0) + Number(r.count); });
+  const data = allDates.map(d => countsByDate[d] || 0);
+
+  const key = safeId;
+  if (state.charts[key]) { state.charts[key].destroy(); }
+  state.charts[key] = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: allDates.map(fmtDisplayDate), // display-only; internal sort/order stays on the raw ISO allDates array
+      datasets: [{
+        label: bucket,
+        data: data,
+        borderColor: chartColor(PIVOTS[direction].indexOf(bucket)),
+        backgroundColor: chartColor(PIVOTS[direction].indexOf(bucket)) + '33',
+        fill: true,
+        tension: 0.25,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        borderWidth: 2
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? allDates[items[0].dataIndex] : '' // exact ISO date in tooltip title
+          }
+        }
+      },
+      scales: {
+        x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
+        y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
+      }
+    }
+  });
+}
+
+function renderTable(direction, bucket, bucketTrendRows, allDates) {
+  const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
+  const table = document.getElementById('table-' + safeId);
+  if (!table) return;
+  const [lo, hi] = AGE_RANGE[direction];
+  const ageBuckets = [];
+  for (let d = lo; d <= hi; d++) ageBuckets.push(d);
+
+  const grid = {};
+  ageBuckets.forEach(a => { grid[a] = {}; allDates.forEach(d => grid[a][d] = 0); });
+  let bucketTotal = 0;
+  bucketTrendRows.forEach(r => {
+    const a = Number(r.aging_after_bag_received);
+    if (grid[a] && grid[a][r.base_date] !== undefined) {
+      grid[a][r.base_date] += Number(r.count);
+      bucketTotal += Number(r.count);
+    }
+  });
+
+  let thead = '<thead><tr><th class="sticky-col">Ageing Bucket</th>';
+  allDates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
+  thead += '</tr></thead>';
+
+  let tbody = '<tbody>';
+  const colTotals = {}; allDates.forEach(d => colTotals[d] = 0);
+  ageBuckets.forEach(a => {
+    tbody += `<tr><td class="sticky-col">Day ${a}</td>`;
+    allDates.forEach(d => {
+      const v = grid[a][d];
+      colTotals[d] += v;
+      tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
+    });
+    tbody += '</tr>';
+  });
+  tbody += '</tbody>';
+
+  let tfoot = '<tfoot><tr><td class="sticky-col">Grand Total</td>';
+  allDates.forEach(d => { tfoot += `<td>${fmtInt(colTotals[d])}</td>`; });
+  tfoot += '</tr></tfoot>';
+
+  table.innerHTML = thead + tbody + tfoot;
+  const countEl = document.getElementById('count-' + safeId);
+  if (countEl) countEl.textContent = fmtInt(bucketTotal);
+}
+
+// New: single combined "Pivot Summary" table — rows = pivot/bucket,
+// columns = base_date, values = total pendency count (summed across all
+// ageing days). This sits above the existing per-bucket sections, which
+// are left exactly as they were (trend graph + ageing-by-date table each).
+function renderPivotSummary(direction, trendRows, allDates) {
+  const el = document.getElementById('pivot-summary-' + direction);
+  if (!el) return;
+  if (!allDates.length) { el.innerHTML = ''; return; }
+
+  const buckets = PIVOTS[direction];
+  const grid = {};
+  buckets.forEach(b => { grid[b] = {}; allDates.forEach(d => grid[b][d] = 0); });
+  trendRows.forEach(r => {
+    if (grid[r.pivot] && grid[r.pivot][r.base_date] !== undefined) {
+      grid[r.pivot][r.base_date] += Number(r.count);
+    }
+  });
+
+  let thead = '<thead><tr><th class="sticky-col">Pivot</th>';
+  allDates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
+  thead += '</tr></thead>';
+
+  let tbody = '<tbody>';
+  const colTotals = {}; allDates.forEach(d => colTotals[d] = 0);
+  buckets.forEach(b => {
+    tbody += `<tr><td class="sticky-col">${escapeHtml(b)}</td>`;
+    allDates.forEach(d => {
+      const v = grid[b][d];
+      colTotals[d] += v;
+      tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
+    });
+    tbody += '</tr>';
+  });
+  tbody += '</tbody>';
+
+  let tfoot = '<tfoot><tr><td class="sticky-col">Grand Total</td>';
+  allDates.forEach(d => { tfoot += `<td>${fmtInt(colTotals[d])}</td>`; });
+  tfoot += '</tr></tfoot>';
+
+  el.innerHTML = `
+    <div class="bucket-head"><h3>Pivot Summary — Day on Day</h3></div>
+    <div class="table-scroll"><table class="pivot-table">${thead}${tbody}${tfoot}</table></div>
+  `;
+}
+
+function updateKPIs(direction, filteredCount) {
+  const el = document.getElementById('kpi-' + direction);
+  if (!el) return;
+  const summary = state.summary[direction] || {};
+  const latest = summary.latestBaseDate ? fmtDisplayDate(summary.latestBaseDate) : '—';
+  el.innerHTML = `
+    <div class="kpi-card"><div class="kpi-label">Filtered Pendency</div><div class="kpi-value">${fmtInt(filteredCount)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Dates Covered</div><div class="kpi-value">${summary.datesCovered || 0}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Latest Base Date</div><div class="kpi-value">${latest}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Ageing Window</div><div class="kpi-value">Day ${AGE_RANGE[direction][0]}–${AGE_RANGE[direction][1]}</div></div>
+  `;
+}
+
+async function renderDashboard(direction) {
+  const container = document.getElementById('sections-' + direction);
+  if (!container) return;
+
+  const hasAnyData = apiConfigured()
+    ? (state.summary[direction] && state.summary[direction].datesCovered > 0)
+    : state.localRaw[direction].length > 0;
+
+  if (!hasAnyData) {
+    container.innerHTML = emptyStateHTML(direction);
+    const kpiEl = document.getElementById('kpi-' + direction);
+    if (kpiEl) kpiEl.innerHTML = '';
+    const summaryEl = document.getElementById('pivot-summary-' + direction);
+    if (summaryEl) summaryEl.innerHTML = '';
+    renderUploadsList(direction);
+    return;
+  }
+
+  try {
+    await refreshTrendData(direction);
+  } catch (err) {
+    setStatus(direction, 'Could not load trend data: ' + err.message, 'error');
+    return;
+  }
+
+  const trendRows = state.trends[direction];
+  const pivotFilter = state.filters[direction].pivot || 'All';
+  const bucketsToShow = pivotFilter === 'All' ? PIVOTS[direction] : [pivotFilter];
+  const allDates = Array.from(new Set(trendRows.map(r => r.base_date))).sort();
+  const filteredCount = trendRows.reduce((sum, r) => sum + Number(r.count), 0);
+
+  renderPivotSummary(direction, trendRows, allDates);
+
+  container.innerHTML = '';
+  bucketsToShow.forEach(bucket => {
+    container.appendChild(buildSectionDOM(direction, bucket));
+  });
+  bucketsToShow.forEach(bucket => {
+    const bucketRows = trendRows.filter(r => r.pivot === bucket);
+    renderChart(direction, bucket, bucketRows, allDates);
+    renderTable(direction, bucket, bucketRows, allDates);
+  });
+
+  updateKPIs(direction, filteredCount);
+  renderUploadsList(direction);
+}
+
+function renderUploadsList(direction) {
+  const el = document.getElementById('uploads-' + direction);
+  if (!el) return;
+  const list = state.uploads[direction];
+  if (!list.length) { el.innerHTML = '<div class="muted">No files uploaded this session.</div>'; return; }
+  el.innerHTML = list.map(u => `
+    <div class="upload-row">
+      <span class="upload-date">${escapeHtml(fmtDisplayDate(u.baseDate))}</span>
+      <span class="upload-file" title="${escapeAttr(u.fileName)}">${escapeHtml(u.fileName)}</span>
+      <span class="upload-count">${fmtInt(u.count)} rows</span>
+      <button class="btn-mini" data-download-day="${direction}|${u.baseDate}">Download</button>
+    </div>
+  `).join('');
+}
+
+/* ---------------------------- FILTER UI ---------------------------------- */
+
+function buildSelect(id, options, selected, placeholder) {
+  let html = `<select id="${id}">`;
+  html += `<option value="All">${placeholder || 'All'}</option>`;
+  options.forEach(o => {
+    html += `<option value="${escapeAttr(o)}" ${String(o) === String(selected) ? 'selected' : ''}>${escapeHtml(String(o))}</option>`;
+  });
+  html += '</select>';
+  return html;
+}
+
+function refreshFilterUI(direction) {
+  const opts = state.filterOptions[direction] || {};
+  const f = state.filters[direction];
+
+  const pivotSel = document.getElementById('filter-pivot-' + direction);
+  if (pivotSel) pivotSel.outerHTML = buildSelect('filter-pivot-' + direction, PIVOTS[direction], f.pivot, 'All Pivots');
+
+  const [lo, hi] = AGE_RANGE[direction];
+  const ageOptions = []; for (let d = lo; d <= hi; d++) ageOptions.push(d);
+  const ageSel = document.getElementById('filter-aging-' + direction);
+  if (ageSel) ageSel.outerHTML = buildSelect('filter-aging-' + direction, ageOptions, f.aging_after_bag_received, 'All Ageing');
+
+  const locSel = document.getElementById('filter-location-' + direction);
+  if (locSel) locSel.outerHTML = buildSelect('filter-location-' + direction, opts.location_name || [], f.location_name, 'All Locations');
+
+  const drawer = document.getElementById('drawer-' + direction);
+  if (drawer) {
+    drawer.innerHTML = DRAWER_FIELDS.map(df => `
+      <div class="filter-field">
+        <label>${escapeHtml(df.label)}</label>
+        ${buildSelect('filter-drawer-' + direction + '-' + df.key, opts[df.key] || [], f[df.key], 'All')}
+      </div>
+    `).join('');
+  }
+
+  rewireFilterInputs(direction);
+}
+
+function rewireFilterInputs(direction) {
+  const pivotSel = document.getElementById('filter-pivot-' + direction);
+  if (pivotSel) pivotSel.onchange = (e) => { state.filters[direction].pivot = e.target.value; renderDashboard(direction); };
+
+  const ageSel = document.getElementById('filter-aging-' + direction);
+  if (ageSel) ageSel.onchange = (e) => { state.filters[direction].aging_after_bag_received = e.target.value; renderDashboard(direction); };
+
+  const locSel = document.getElementById('filter-location-' + direction);
+  if (locSel) locSel.onchange = (e) => { state.filters[direction].location_name = e.target.value; renderDashboard(direction); };
+
+  DRAWER_FIELDS.forEach(df => {
+    const sel = document.getElementById('filter-drawer-' + direction + '-' + df.key);
+    if (sel) sel.onchange = (e) => { state.filters[direction][df.key] = e.target.value; renderDashboard(direction); };
+  });
+}
+
+function wireDirection(direction) {
+  const moreBtn = document.getElementById('more-filters-btn-' + direction);
+  const drawerWrap = document.getElementById('drawer-wrap-' + direction);
+  if (moreBtn && drawerWrap) {
+    moreBtn.addEventListener('click', () => {
+      state.drawerOpen[direction] = !state.drawerOpen[direction];
+      drawerWrap.classList.toggle('open', state.drawerOpen[direction]);
+      moreBtn.textContent = state.drawerOpen[direction] ? 'Hide Filters ▾' : 'Select More Filters ▸';
+    });
+  }
+  const clearBtn = document.getElementById('clear-filters-' + direction);
+  if (clearBtn) {
+    clearBtn.addEventListener('click', async () => {
+      state.filters[direction] = { pivot: 'All', aging_after_bag_received: 'All', location_name: 'All', awb_search: '' };
+      DRAWER_FIELDS.forEach(df => state.filters[direction][df.key] = 'All');
+      refreshFilterUI(direction);
+      await renderDashboard(direction);
+    });
+  }
+  const uploadsEl = document.getElementById('uploads-' + direction);
+  if (uploadsEl) {
+    uploadsEl.addEventListener('click', e => {
+      const key = e.target.getAttribute('data-download-day');
+      if (!key) return;
+      const [dir, baseDate] = key.split('|');
+      const rows = state.localRaw[dir].filter(r => r.base_date === baseDate);
+      if (!rows.length) { alert('This day\'s raw records are only kept for the current browser session and are no longer available locally. Use "Download Master Data" to pull the full stored dataset from the API instead.'); return; }
+      downloadCSV(`${dir}_${baseDate}_processed.csv`, rows.map(r => Object.assign({}, r, { direction: dir })));
+    });
+  }
+}
+
+function setStatus(direction, message, type) {
+  const el = document.getElementById('status-' + direction);
+  if (!el) return;
+  if (!message) { el.style.display = 'none'; return; }
+  el.textContent = message;
+  el.className = 'status-banner status-' + (type || 'info');
+  el.style.display = 'block';
+}
+
+/* ---------------------------- UPLOAD FLOW --------------------------------- */
+
+async function startUpload(direction, file, dateOverride) {
+  setStatus(direction, `Processing "${file.name}"...`, 'info');
+  handleRawUpload(direction, file, dateOverride, {
+    onNeedDate: () => {
+      pendingUpload = { direction, file };
+      document.getElementById('date-modal-filename').textContent = file.name;
+      document.getElementById('date-modal-direction').value = direction;
+      document.getElementById('date-modal-input').value = '';
+      document.getElementById('date-modal').classList.add('open');
+      setStatus(direction, '', null);
+    },
+    onProgress: (n) => setStatus(direction, `Processing "${file.name}"... ${fmtInt(n)} rows read`, 'info'),
+    onComplete: async (buffer, totalRows) => {
+      const baseDate = extractDateFromFilename(file.name, new Date().getFullYear()) || pendingUpload && pendingUpload.dateOverride;
+      await finishUpload(direction, file, buffer, totalRows);
+    },
+    onError: (msg) => setStatus(direction, `Error processing "${file.name}": ${msg}`, 'error')
+  });
+}
+
+async function finishUpload(direction, file, buffer, totalRows) {
+  // baseDate is embedded in every processed record already.
+  const baseDate = buffer.length ? buffer[0].base_date : (extractDateFromFilename(file.name, new Date().getFullYear()));
+  if (!baseDate) {
+    setStatus(direction, `Error: could not determine base date for "${file.name}".`, 'error');
+    return;
+  }
+  commitLocalBuffer(direction, baseDate, buffer, totalRows, file.name);
+
+  if (apiConfigured()) {
+    setStatus(direction, `Uploading ${fmtInt(buffer.length)} records for ${fmtDisplayDate(baseDate)} to Google Sheets...`, 'info');
+    try {
+      const result = await apiPost('uploadBase', { direction, baseDate, records: buffer });
+      setStatus(direction, `Done: "${file.name}" — ${fmtInt(result.recordsStored)} pendency records stored for ${fmtDisplayDate(baseDate)} (from ${fmtInt(totalRows)} rows).`, 'success');
+    } catch (err) {
+      setStatus(direction, `Saved locally, but could not sync to Google Sheets: ${err.message}`, 'error');
+    }
+    await refreshFilterOptionsAndSummary(direction);
+    refreshFilterUI(direction);
+  } else {
+    setStatus(direction, `Done: "${file.name}" — ${fmtInt(buffer.length)} pendency records loaded from ${fmtInt(totalRows)} rows. (Local only — configure the API URL in Settings to persist this.)`, 'success');
+    await refreshFilterOptionsAndSummary(direction);
+    refreshFilterUI(direction);
+  }
+  await renderDashboard(direction);
+}
+
+function initUploadControls(direction) {
+  const input = document.getElementById('file-input-' + direction);
+  input.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    startUpload(direction, file, null);
+    input.value = '';
+  });
+}
+
+function initDateModal() {
+  document.getElementById('date-modal-cancel').addEventListener('click', () => {
+    document.getElementById('date-modal').classList.remove('open');
+    pendingUpload = null;
+  });
+  document.getElementById('date-modal-confirm').addEventListener('click', () => {
+    const dateVal = document.getElementById('date-modal-input').value;
+    if (!dateVal || !pendingUpload) return;
+    document.getElementById('date-modal').classList.remove('open');
+    const { direction, file } = pendingUpload;
+    pendingUpload = null;
+    startUpload(direction, file, dateVal);
+  });
+}
+
+/* ---------------------------- MASTER DATA CONTROLS ------------------------ */
+
+async function downloadMasterData() {
+  const btn = document.getElementById('download-master-btn');
+  const originalText = btn.textContent;
+  btn.textContent = 'Preparing...'; btn.disabled = true;
+  try {
+    let all = [];
+    if (apiConfigured()) {
+      const [fwd, rev] = await Promise.all([
+        apiGet('getBaseData', { direction: 'Forward' }),
+        apiGet('getBaseData', { direction: 'Reverse' })
+      ]);
+      all = fwd.records.map(r => Object.assign({}, r, { direction: 'Forward' }))
+        .concat(rev.records.map(r => Object.assign({}, r, { direction: 'Reverse' })));
+    } else {
+      all = state.localRaw.Forward.concat(state.localRaw.Reverse);
+    }
+    if (!all.length) { alert('No master data to download yet.'); return; }
+    downloadCSV('Master_Data_Pendency.csv', all);
+  } catch (err) {
+    alert('Could not download master data: ' + err.message);
+  } finally {
+    btn.textContent = originalText; btn.disabled = false;
+  }
+}
+
+function initMasterDataControls() {
+  document.getElementById('download-master-btn').addEventListener('click', downloadMasterData);
+  document.getElementById('load-master-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    handleMasterDataLoad(file, {
+      onComplete: async (addedDates) => {
+        alert(addedDates
+          ? `Restored ${addedDates} day(s) of historical data locally. (This does not sync to Google Sheets — use Upload Forward/Reverse Base for that.)`
+          : 'No new dates to restore (already loaded).');
+        await refreshFilterOptionsAndSummary('Forward'); await refreshFilterOptionsAndSummary('Reverse');
+        refreshFilterUI('Forward'); refreshFilterUI('Reverse');
+        await renderDashboard('Forward'); await renderDashboard('Reverse');
+      },
+      onError: (msg) => alert('Could not load master data: ' + msg)
+    });
+    e.target.value = '';
+  });
+}
+
+/* ---------------------------- API SETTINGS UI ------------------------------ */
+
+function initApiSettings() {
+  const input = document.getElementById('api-url-input');
+  const saveBtn = document.getElementById('api-url-save');
+  if (input) input.value = state.apiUrl;
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      const url = (input.value || '').trim();
+      state.apiUrl = url;
+      saveApiUrlToStorage(url);
+      await pingApi();
+      await refreshFilterOptionsAndSummary('Forward'); await refreshFilterOptionsAndSummary('Reverse');
+      refreshFilterUI('Forward'); refreshFilterUI('Reverse');
+      await renderDashboard('Forward'); await renderDashboard('Reverse');
+    });
+  }
+}
+
+/* ---------------------------- TABS ------------------------------------- */
+
+function initTabs() {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+}
+
+/* ---------------------------- INIT --------------------------------------- */
+
+function safeInitStep(label, fn) {
+  try { return fn(); } catch (err) { console.error('Init step failed: ' + label, err); }
+}
+
+async function init() {
+  state.apiUrl = loadApiUrlFromStorage();
+
+  safeInitStep('initApiSettings', initApiSettings);
+  safeInitStep('initDateModal', initDateModal);
+  safeInitStep('initMasterDataControls', initMasterDataControls);
+  safeInitStep('initTabs', initTabs);
+  ['Forward', 'Reverse'].forEach(direction => {
+    safeInitStep('wireDirection:' + direction, () => wireDirection(direction));
+    safeInitStep('initUploadControls:' + direction, () => initUploadControls(direction));
+  });
+
+  await safeInitStep('pingApi', pingApi);
+  for (const direction of ['Forward', 'Reverse']) {
+    await safeInitStep('refreshFilterOptionsAndSummary:' + direction, () => refreshFilterOptionsAndSummary(direction));
+    safeInitStep('refreshFilterUI:' + direction, () => refreshFilterUI(direction));
+    await safeInitStep('renderDashboard:' + direction, () => renderDashboard(direction));
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => { init(); });
+
+</script>
+</body>
+</html>
