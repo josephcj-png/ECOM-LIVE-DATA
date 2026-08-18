@@ -1015,64 +1015,82 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
   const key = safeId;
   if (state.charts[key]) { try { state.charts[key].destroy(); } catch (e) {} state.charts[key] = null; }
 
-  const canvasEl = document.getElementById('chart-' + safeId);
-  if (!canvasEl) return;
-  let ctx;
-  try { ctx = canvasEl.getContext('2d'); } catch (e) { console.error('Chart context error for ' + safeId, e); return; }
-  if (!ctx) return;
-
   const color = chartColor(PIVOTS[direction].indexOf(bucket));
-  // A single date can't form a visible line segment, so render single-date
-  // views as a bar (always visible). Two or more dates render as a trend line.
   const singlePoint = allDates.length < 2;
 
-  const chart = new Chart(ctx, {
-    type: singlePoint ? 'bar' : 'line',
-    data: {
-      labels: allDates.map(fmtDisplayDate),
-      datasets: [{
-        label: bucket,
-        data: data,
-        borderColor: color,
-        backgroundColor: singlePoint ? color + 'cc' : color + '33',
-        fill: !singlePoint,
-        tension: 0.25,
-        pointRadius: 4,
-        pointHoverRadius: 6,
-        pointBackgroundColor: color,
-        borderWidth: 2,
-        spanGaps: true,
-        maxBarThickness: 80
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title: (items) => items.length ? allDates[items[0].dataIndex] : ''
+  // Draw once layout has settled so the container reports a real width. We
+  // then EXPLICITLY size the canvas (both the CSS box and the backing pixel
+  // buffer) and disable Chart.js responsive auto-sizing. Relying on
+  // responsive:true was the root cause of the blank charts: if the parent's
+  // measured size was 0 at creation time, Chart.js drew a zero-size canvas.
+  const draw = () => {
+    const box = canvas.parentElement; // .chart-box
+    if (!box) return;
+    const cssW = Math.max(box.clientWidth || 0, 300);
+    const cssH = Math.max(box.clientHeight || 0, 260);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+
+    let ctx;
+    try { ctx = canvas.getContext('2d'); } catch (e) { showChartError(box, 'Chart could not initialise.'); return; }
+    if (!ctx) { showChartError(box, 'Chart could not initialise.'); return; }
+
+    try {
+      const chart = new Chart(ctx, {
+        type: singlePoint ? 'bar' : 'line',
+        data: {
+          labels: allDates.map(fmtDisplayDate),
+          datasets: [{
+            label: bucket,
+            data: data,
+            borderColor: color,
+            backgroundColor: singlePoint ? color + 'cc' : color + '33',
+            fill: !singlePoint,
+            tension: 0.25,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            pointBackgroundColor: color,
+            borderWidth: 2,
+            spanGaps: true,
+            maxBarThickness: 80
+          }]
+        },
+        options: {
+          responsive: false,          // we size the canvas ourselves (see above)
+          maintainAspectRatio: false,
+          devicePixelRatio: dpr,
+          animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { title: (items) => items.length ? allDates[items[0].dataIndex] : '' } }
+          },
+          scales: {
+            x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
+            y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
           }
         }
-      },
-      scales: {
-        x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
-        y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
-      }
+      });
+      state.charts[key] = chart;
+    } catch (e) {
+      console.error('Chart render failed for ' + safeId, e);
+      showChartError(box, 'Chart failed to render: ' + (e && e.message ? e.message : 'unknown error'));
     }
-  });
-  state.charts[key] = chart;
+  };
 
-  // Belt-and-suspenders: if the .chart-box parent hadn't finished layout when
-  // Chart.js first measured it (a known cause of a blank/zero-height canvas),
-  // force a resize once on the next frame so it picks up the real dimensions.
+  // Two rAFs so layout + paint have flushed and clientWidth is non-zero.
   if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => {
-      try { if (state.charts[key] === chart) chart.resize(); } catch (e) {}
-    });
+    requestAnimationFrame(() => requestAnimationFrame(draw));
+  } else {
+    setTimeout(draw, 0);
   }
+}
+
+function showChartError(box, msg) {
+  if (!box) return;
+  box.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#a5231f;font-size:13px;text-align:center;padding:12px;">${escapeHtml(msg)}</div>`;
 }
 
 function renderTable(direction, bucket, bucketTrendRows, allDates) {
@@ -1083,37 +1101,45 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
   const ageBuckets = [];
   for (let d = lo; d <= hi; d++) ageBuckets.push(d);
 
+  // grid[date][ageDay] = AWB count
   const grid = {};
-  ageBuckets.forEach(a => { grid[a] = {}; allDates.forEach(d => grid[a][d] = 0); });
+  allDates.forEach(d => { grid[d] = {}; ageBuckets.forEach(a => grid[d][a] = 0); });
   let bucketTotal = 0;
   bucketTrendRows.forEach(r => {
     const a = Number(r.aging_after_bag_received);
-    if (grid[a] && grid[a][r.base_date] !== undefined) {
-      grid[a][r.base_date] += Number(r.count);
+    if (grid[r.base_date] && grid[r.base_date][a] !== undefined) {
+      grid[r.base_date][a] += Number(r.count);
       bucketTotal += Number(r.count);
     }
   });
 
-  let thead = '<thead><tr><th class="sticky-col">Ageing Bucket</th>';
-  allDates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
-  thead += '</tr></thead>';
+  // Header: first column = Date, then one column per ageing day, then Total.
+  let thead = '<thead><tr><th class="sticky-col">Date</th>';
+  ageBuckets.forEach(a => thead += `<th>Day ${a}</th>`);
+  thead += '<th>Total</th></tr></thead>';
 
+  // One row per date. Values = AWB counts for that date & ageing day.
+  const ageTotals = {}; ageBuckets.forEach(a => ageTotals[a] = 0);
+  let grandTotal = 0;
   let tbody = '<tbody>';
-  const colTotals = {}; allDates.forEach(d => colTotals[d] = 0);
-  ageBuckets.forEach(a => {
-    tbody += `<tr><td class="sticky-col">Day ${a}</td>`;
-    allDates.forEach(d => {
-      const v = grid[a][d];
-      colTotals[d] += v;
+  allDates.forEach(d => {
+    tbody += `<tr><td class="sticky-col" title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</td>`;
+    let rowTotal = 0;
+    ageBuckets.forEach(a => {
+      const v = grid[d][a];
+      ageTotals[a] += v;
+      rowTotal += v;
       tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
     });
-    tbody += '</tr>';
+    grandTotal += rowTotal;
+    tbody += `<td><strong>${fmtInt(rowTotal)}</strong></td></tr>`;
   });
   tbody += '</tbody>';
 
+  // Footer: column totals across dates.
   let tfoot = '<tfoot><tr><td class="sticky-col">Grand Total</td>';
-  allDates.forEach(d => { tfoot += `<td>${fmtInt(colTotals[d])}</td>`; });
-  tfoot += '</tr></tfoot>';
+  ageBuckets.forEach(a => { tfoot += `<td>${ageTotals[a] ? fmtInt(ageTotals[a]) : ''}</td>`; });
+  tfoot += `<td>${fmtInt(grandTotal)}</td></tr></tfoot>`;
 
   table.innerHTML = thead + tbody + tfoot;
   const countEl = document.getElementById('count-' + safeId);
