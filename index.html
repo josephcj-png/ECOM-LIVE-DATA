@@ -193,8 +193,7 @@ select:focus, input:focus { outline: 2px solid var(--green); outline-offset: 1px
   font-size: 12px;
   font-weight: 700;
 }
-.chart-box { height: 260px; margin-bottom: 14px; position: relative; }
-.chart-box canvas { display: block; width: 100% !important; height: 100% !important; }
+.chart-box { position: relative; height: 280px; margin-bottom: 14px; width: 100%; }
 
 .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
 table.pivot-table { border-collapse: collapse; width: 100%; font-size: 12px; }
@@ -1014,65 +1013,65 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
   const data = allDates.map(d => countsByDate[d] || 0);
 
   const key = safeId;
-  if (state.charts[key]) { state.charts[key].destroy(); state.charts[key] = null; }
+  if (state.charts[key]) { try { state.charts[key].destroy(); } catch (e) {} state.charts[key] = null; }
 
-  // Defer to the next frame so the freshly-inserted .chart-box has flushed
-  // layout (a non-zero height) before Chart.js measures it. Creating the
-  // chart synchronously right after innerHTML/appendChild can have the parent
-  // report height 0, which makes Chart.js render an invisible zero-height
-  // canvas — the classic "blank graph" symptom.
-  const draw = () => {
-    const liveCanvas = document.getElementById('chart-' + safeId);
-    if (!liveCanvas) return;
-    let ctx;
-    try { ctx = liveCanvas.getContext('2d'); } catch (e) { console.error('Chart context error for ' + safeId, e); return; }
-    if (!ctx) return;
-    const color = chartColor(PIVOTS[direction].indexOf(bucket));
-    // A single date can't form a visible line segment, so render those as a
-    // bar (always visible). Two or more dates render as the trend line.
-    const singlePoint = allDates.length < 2;
-    state.charts[key] = new Chart(ctx, {
-      type: singlePoint ? 'bar' : 'line',
-      data: {
-        labels: allDates.map(fmtDisplayDate),
-        datasets: [{
-          label: bucket,
-          data: data,
-          borderColor: color,
-          backgroundColor: singlePoint ? color + 'cc' : color + '33',
-          fill: !singlePoint,
-          tension: 0.25,
-          pointRadius: 4,
-          pointHoverRadius: 6,
-          pointBackgroundColor: color,
-          borderWidth: 2,
-          spanGaps: true,
-          maxBarThickness: 80
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: {
-              title: (items) => items.length ? allDates[items[0].dataIndex] : ''
-            }
+  const canvasEl = document.getElementById('chart-' + safeId);
+  if (!canvasEl) return;
+  let ctx;
+  try { ctx = canvasEl.getContext('2d'); } catch (e) { console.error('Chart context error for ' + safeId, e); return; }
+  if (!ctx) return;
+
+  const color = chartColor(PIVOTS[direction].indexOf(bucket));
+  // A single date can't form a visible line segment, so render single-date
+  // views as a bar (always visible). Two or more dates render as a trend line.
+  const singlePoint = allDates.length < 2;
+
+  const chart = new Chart(ctx, {
+    type: singlePoint ? 'bar' : 'line',
+    data: {
+      labels: allDates.map(fmtDisplayDate),
+      datasets: [{
+        label: bucket,
+        data: data,
+        borderColor: color,
+        backgroundColor: singlePoint ? color + 'cc' : color + '33',
+        fill: !singlePoint,
+        tension: 0.25,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        pointBackgroundColor: color,
+        borderWidth: 2,
+        spanGaps: true,
+        maxBarThickness: 80
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? allDates[items[0].dataIndex] : ''
           }
-        },
-        scales: {
-          x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
-          y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
         }
+      },
+      scales: {
+        x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
+        y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
       }
-    });
-  };
+    }
+  });
+  state.charts[key] = chart;
+
+  // Belt-and-suspenders: if the .chart-box parent hadn't finished layout when
+  // Chart.js first measured it (a known cause of a blank/zero-height canvas),
+  // force a resize once on the next frame so it picks up the real dimensions.
   if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => requestAnimationFrame(draw));
-  } else {
-    draw();
+    requestAnimationFrame(() => {
+      try { if (state.charts[key] === chart) chart.resize(); } catch (e) {}
+    });
   }
 }
 
