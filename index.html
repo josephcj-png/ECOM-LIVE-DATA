@@ -1014,40 +1014,66 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
   const data = allDates.map(d => countsByDate[d] || 0);
 
   const key = safeId;
-  if (state.charts[key]) { state.charts[key].destroy(); }
-  state.charts[key] = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: {
-      labels: allDates.map(fmtDisplayDate), // display-only; internal sort/order stays on the raw ISO allDates array
-      datasets: [{
-        label: bucket,
-        data: data,
-        borderColor: chartColor(PIVOTS[direction].indexOf(bucket)),
-        backgroundColor: chartColor(PIVOTS[direction].indexOf(bucket)) + '33',
-        fill: true,
-        tension: 0.25,
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        borderWidth: 2
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title: (items) => items.length ? allDates[items[0].dataIndex] : '' // exact ISO date in tooltip title
-          }
-        }
+  if (state.charts[key]) { state.charts[key].destroy(); state.charts[key] = null; }
+
+  // Defer to the next frame so the freshly-inserted .chart-box has flushed
+  // layout (a non-zero height) before Chart.js measures it. Creating the
+  // chart synchronously right after innerHTML/appendChild can have the parent
+  // report height 0, which makes Chart.js render an invisible zero-height
+  // canvas — the classic "blank graph" symptom.
+  const draw = () => {
+    const liveCanvas = document.getElementById('chart-' + safeId);
+    if (!liveCanvas) return;
+    let ctx;
+    try { ctx = liveCanvas.getContext('2d'); } catch (e) { console.error('Chart context error for ' + safeId, e); return; }
+    if (!ctx) return;
+    const color = chartColor(PIVOTS[direction].indexOf(bucket));
+    // A single date can't form a visible line segment, so render those as a
+    // bar (always visible). Two or more dates render as the trend line.
+    const singlePoint = allDates.length < 2;
+    state.charts[key] = new Chart(ctx, {
+      type: singlePoint ? 'bar' : 'line',
+      data: {
+        labels: allDates.map(fmtDisplayDate),
+        datasets: [{
+          label: bucket,
+          data: data,
+          borderColor: color,
+          backgroundColor: singlePoint ? color + 'cc' : color + '33',
+          fill: !singlePoint,
+          tension: 0.25,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          pointBackgroundColor: color,
+          borderWidth: 2,
+          spanGaps: true,
+          maxBarThickness: 80
+        }]
       },
-      scales: {
-        x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
-        y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: (items) => items.length ? allDates[items[0].dataIndex] : ''
+            }
+          }
+        },
+        scales: {
+          x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
+          y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
+        }
       }
-    }
-  });
+    });
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(draw));
+  } else {
+    draw();
+  }
 }
 
 function renderTable(direction, bucket, bucketTrendRows, allDates) {
@@ -1468,6 +1494,10 @@ function initTabs() {
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+      // Re-render the now-visible panel: a chart created while its panel was
+      // display:none would have measured a 0-height parent. Rendering again
+      // now that it's visible guarantees correctly-sized, visible charts.
+      renderDashboard(btn.dataset.tab);
     });
   });
 }
