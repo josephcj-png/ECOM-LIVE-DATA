@@ -193,7 +193,8 @@ select:focus, input:focus { outline: 2px solid var(--green); outline-offset: 1px
   font-size: 12px;
   font-weight: 700;
 }
-.chart-box { height: 260px; margin-bottom: 14px; }
+.chart-box { height: 260px; margin-bottom: 14px; position: relative; }
+.chart-box canvas { display: block; width: 100% !important; height: 100% !important; }
 
 .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
 table.pivot-table { border-collapse: collapse; width: 100%; font-size: 12px; }
@@ -304,10 +305,11 @@ footer.foot { text-align: center; color: var(--text-dim); font-size: 12px; paddi
     <label class="btn btn-file">Load Master Data
       <input type="file" id="load-master-input" accept=".csv">
     </label>
+    <button class="btn" id="settings-toggle" title="Backend settings" aria-label="Settings">&#9881;</button>
   </div>
 </header>
 
-<div class="api-bar">
+<div class="api-bar" id="api-bar" hidden>
   <div class="api-bar-row">
     <label for="api-url-input">Apps Script Web App URL</label>
     <input type="text" id="api-url-input" placeholder="https://script.google.com/macros/s/XXXXX/exec">
@@ -663,6 +665,15 @@ function apiConfigured() {
   return !!state.apiUrl;
 }
 
+// True only when the API is both configured AND currently reachable (last
+// ping/summary succeeded). When the API is configured but down, the
+// dashboard transparently falls back to whatever raw data was processed in
+// this browser session, so an unreachable backend never leaves the user
+// staring at an empty dashboard after a successful local parse.
+function apiLive() {
+  return !!state.apiUrl && state.apiStatus === 'connected';
+}
+
 async function apiGet(action, params) {
   const usp = new URLSearchParams(Object.assign({ action }, params || {}));
   const res = await fetch(state.apiUrl + '?' + usp.toString(), { method: 'GET' });
@@ -748,18 +759,24 @@ function activeFilterParams(direction) {
 // Refreshes state.trends[direction] from whichever source is active.
 async function refreshTrendData(direction) {
   const params = activeFilterParams(direction);
-  if (apiConfigured()) {
-    const data = await apiGet('getTrend', Object.assign({ direction }, params));
-    state.trends[direction] = data.rows;
-  } else {
-    state.trends[direction] = aggregateLocalTrend(state.localRaw[direction], params);
+  if (apiLive()) {
+    try {
+      const data = await apiGet('getTrend', Object.assign({ direction }, params));
+      state.trends[direction] = data.rows;
+      return;
+    } catch (err) {
+      // API went down mid-session: fall through to local data rather than erroring out.
+      state.apiStatus = 'error';
+      renderApiStatus();
+    }
   }
+  state.trends[direction] = aggregateLocalTrend(state.localRaw[direction], params);
 }
 
 // Refreshes filter dropdown options + unfiltered summary KPIs. Cheaper to
 // call only on init and after an upload, not on every filter change.
 async function refreshFilterOptionsAndSummary(direction) {
-  if (apiConfigured()) {
+  if (apiLive()) {
     try {
       const [filters, summary] = await Promise.all([
         apiGet('getFilters', { direction }),
@@ -767,15 +784,15 @@ async function refreshFilterOptionsAndSummary(direction) {
       ]);
       state.filterOptions[direction] = filters;
       state.summary[direction] = summary;
+      return;
     } catch (err) {
-      // Deliberately not calling setStatus here: this can run right after
-      // finishUpload has already set a more specific, more important status
-      // message (e.g. "Saved locally, but could not sync..."), and this
-      // secondary failure shouldn't stomp on it. Connectivity problems are
-      // already visible via the dedicated API status bar (pingApi/renderApiStatus).
-      console.error('Could not load filters/summary for ' + direction + ':', err);
+      // API unreachable — fall through to local so the dashboard still works.
+      state.apiStatus = 'error';
+      renderApiStatus();
+      console.error('Could not load filters/summary for ' + direction + ', falling back to local:', err);
     }
-  } else {
+  }
+  {
     const opts = {};
     ['location_name'].concat(DRAWER_FIELDS.map(f => f.key)).forEach(dim => {
       opts[dim] = uniqueSorted(state.localRaw[direction], dim);
@@ -1140,9 +1157,8 @@ async function renderDashboard(direction) {
   const container = document.getElementById('sections-' + direction);
   if (!container) return;
 
-  const hasAnyData = apiConfigured()
-    ? (state.summary[direction] && state.summary[direction].datesCovered > 0)
-    : state.localRaw[direction].length > 0;
+  const hasAnyData = (apiLive() && state.summary[direction] && state.summary[direction].datesCovered > 0)
+    || state.localRaw[direction].length > 0;
 
   if (!hasAnyData) {
     container.innerHTML = emptyStateHTML(direction);
@@ -1201,10 +1217,11 @@ function renderUploadsList(direction) {
 /* ---------------------------- FILTER UI ---------------------------------- */
 
 function buildSelect(id, options, selected, placeholder) {
+  const isAll = (selected === undefined || selected === null || selected === '' || String(selected) === 'All');
   let html = `<select id="${id}">`;
-  html += `<option value="All">${placeholder || 'All'}</option>`;
+  html += `<option value="All" ${isAll ? 'selected' : ''}>${placeholder || 'All'}</option>`;
   options.forEach(o => {
-    html += `<option value="${escapeAttr(o)}" ${String(o) === String(selected) ? 'selected' : ''}>${escapeHtml(String(o))}</option>`;
+    html += `<option value="${escapeAttr(o)}" ${!isAll && String(o) === String(selected) ? 'selected' : ''}>${escapeHtml(String(o))}</option>`;
   });
   html += '</select>';
   return html;
@@ -1377,7 +1394,7 @@ async function downloadMasterData() {
   btn.textContent = 'Preparing...'; btn.disabled = true;
   try {
     let all = [];
-    if (apiConfigured()) {
+    if (apiLive()) {
       const [fwd, rev] = await Promise.all([
         apiGet('getBaseData', { direction: 'Forward' }),
         apiGet('getBaseData', { direction: 'Reverse' })
@@ -1421,6 +1438,13 @@ function initMasterDataControls() {
 function initApiSettings() {
   const input = document.getElementById('api-url-input');
   const saveBtn = document.getElementById('api-url-save');
+  const toggleBtn = document.getElementById('settings-toggle');
+  const apiBar = document.getElementById('api-bar');
+  if (toggleBtn && apiBar) {
+    toggleBtn.addEventListener('click', () => {
+      apiBar.hidden = !apiBar.hidden;
+    });
+  }
   if (input) input.value = state.apiUrl;
   if (saveBtn) {
     saveBtn.addEventListener('click', async () => {
