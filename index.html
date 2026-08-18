@@ -6,7 +6,14 @@
 <title>Ecom Live Dashboard Pendency Trends</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<!-- Chart.js: cdnjs does NOT host 4.4.4 (that URL 404s and left every graph blank).
+     Load from jsDelivr, with a cdnjs 4.4.1 fallback if jsDelivr is blocked. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+if (typeof Chart === "undefined") {
+  document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>');
+}
+</script>
 <style>
 :root {
   --bg: #f4f7f5;
@@ -1031,8 +1038,16 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
     const dpr = window.devicePixelRatio || 1;
     canvas.style.width = cssW + 'px';
     canvas.style.height = cssH + 'px';
-    canvas.width = Math.round(cssW * dpr);
-    canvas.height = Math.round(cssH * dpr);
+    // Set the CSS-pixel size only. Chart.js multiplies these by
+    // options.devicePixelRatio itself; doing it here as well squared the
+    // ratio and rendered everything at half scale on retina/150% displays.
+    canvas.width = Math.round(cssW);
+    canvas.height = Math.round(cssH);
+
+    if (typeof Chart === 'undefined') {
+      showChartError(box, 'Chart library failed to load (blocked or offline). Check the network tab for chart.umd.min.js.');
+      return;
+    }
 
     let ctx;
     try { ctx = canvas.getContext('2d'); } catch (e) { showChartError(box, 'Chart could not initialise.'); return; }
@@ -1080,12 +1095,17 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
     }
   };
 
-  // Two rAFs so layout + paint have flushed and clientWidth is non-zero.
+  // Draw once layout has flushed. Two rAFs give the browser a chance to
+  // measure the container, but rAF NEVER fires while the tab is hidden
+  // (background tab, restored session, page opened in a new tab), which
+  // left the charts permanently undrawn. So we also arm a setTimeout and
+  // let whichever fires first win.
+  let drawn = false;
+  const drawOnce = () => { if (drawn) return; drawn = true; draw(); };
   if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => requestAnimationFrame(draw));
-  } else {
-    setTimeout(draw, 0);
+    requestAnimationFrame(() => requestAnimationFrame(drawOnce));
   }
+  setTimeout(drawOnce, 60);
 }
 
 function showChartError(box, msg) {
