@@ -15,6 +15,7 @@ if (typeof Chart === "undefined") {
 }
 </script>
 <style>
+
 :root {
   --bg: #f4f7f5;
   --panel: #ffffff;
@@ -281,12 +282,24 @@ footer.foot { text-align: center; color: var(--text-dim); font-size: 12px; paddi
 .api-dot-bad { background: var(--red); }
 .api-dot-muted { background: var(--text-dim); }
 
+/* ---------- Drill-down ---------- */
+tr.drill-row { cursor: pointer; }
+tr.drill-row:hover td { background: #eef7f1; }
+.drill-caret { color: var(--green); font-size: 10px; margin-right: 2px; }
+.drilldown-panel { margin-top: 14px; }
+.drilldown-breadcrumb { font-size: 13px; color: var(--text-dim); padding: 6px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.drilldown-breadcrumb .crumb { cursor: pointer; color: var(--green-dark); }
+.drilldown-breadcrumb .crumb:hover { text-decoration: underline; }
+.drilldown-breadcrumb .crumb:last-child { color: var(--text); font-weight: 600; cursor: default; text-decoration: none; }
+.drilldown-breadcrumb .crumb-sep { color: var(--text-dim); }
+
 @media (max-width: 720px) {
   .filter-bar { flex-direction: column; align-items: stretch; }
   .filter-item { min-width: 0; }
   .upload-row { grid-template-columns: 80px 1fr 70px; }
   .upload-count { display: none; }
 }
+
 
 </style>
 </head>
@@ -308,6 +321,7 @@ footer.foot { text-align: center; color: var(--text-dim); font-size: 12px; paddi
       <input type="file" id="file-input-Reverse" accept=".csv,.xlsx,.xls">
     </label>
     <button class="btn btn-primary" id="download-master-btn">Download Master Data</button>
+    <button class="btn btn-primary" id="download-raw-numbers-btn" title="Download pivot summary + location-wise day-on-day numbers">Download Raw Numbers</button>
     <label class="btn btn-file">Load Master Data
       <input type="file" id="load-master-input" accept=".csv">
     </label>
@@ -418,6 +432,7 @@ footer.foot { text-align: center; color: var(--text-dim); font-size: 12px; paddi
 </div>
 
 <script>
+
 /* ============================================================================
    Ecom Live Dashboard Pendency Trends — client
    ----------------------------------------------------------------------------
@@ -447,38 +462,65 @@ const MONTHS = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, 
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 // Columns retained from the raw base (per Filters Format file), in export order.
-const RAW_COLUMNS = [
+// Core columns present in every base file:
+const RAW_COLUMNS_CORE = [
   'awb_number','category','location_name','region','aging_bucket','manifest_code',
   'shipment_type','item_status_text','seal_number','manifest_status_text',
   'manifest_origin_name','manifest_origin_type','manifest_destination_name',
   'manifest_destination_type','client_name','client_category','item_last_updated','order_type'
 ];
+// Extra columns from the updated Filters Format (mainly Reverse; treated as
+// optional — absent values are stored as ''). Used by the drill-downs
+// (bin level, rejection category) and extra filters.
+const RAW_COLUMNS_EXTRA = [
+  'rejection_category','bin_level','layout_name','doh_remarks','reason','doh_flag',
+  'dsp_awb_number','connected_awb'
+];
+const RAW_COLUMNS = RAW_COLUMNS_CORE.concat(RAW_COLUMNS_EXTRA).concat(['volumetric_flag']);
 const INTERNAL_ONLY_COLUMNS = ['manifest_received_time_ist'];
-const REQUIRED_RAW_COLUMNS = RAW_COLUMNS.concat(INTERNAL_ONLY_COLUMNS);
+// Only the core columns are strictly required in an uploaded base file.
+const REQUIRED_RAW_COLUMNS = RAW_COLUMNS_CORE.concat(INTERNAL_ONLY_COLUMNS);
 
 const PIVOTS = {
-  Forward: ['BRSNR', 'FMODC Short', 'FWD DC-DC Short'],
-  Reverse: ['BRSNR', 'LMODC Short', 'REV DC-DC Short']
+  Forward: ['BRSNR', 'FMODC Short', 'FWD DC-DC Short', 'At Dock', 'Rec At DC'],
+  Reverse: ['BRSNR', 'LMODC Short', 'REV DC-DC Short', 'At Dock', 'Rec At DC']
 };
-const AGE_RANGE = { Forward: [3, 15], Reverse: [2, 20] };
+// Full ageing window shown in the DASHBOARD (all days). Storage of raw
+// AWB-level rows is restricted to checkpoint days (STORE_AGE_DAYS) to save
+// space, but the aggregated trend summary keeps every day in this range.
+const AGE_RANGE = { Forward: [1, 15], Reverse: [1, 20] };
+// Checkpoint ageing days for which detailed raw AWB rows are persisted.
+const STORE_AGE_DAYS = { Forward: [3, 6, 10, 15], Reverse: [3, 6, 15, 20] };
+
+// Category values that map to the two new category-driven pivots.
+const CATEGORY_PIVOTS = {
+  'IN BAG / At Dock': 'At Dock',
+  'NOT IN BAG / Received at DC': 'Rec At DC'
+};
+// The original BRSNR-family pivots are gated on this category.
 const CATEGORY_FILTER = 'IN BAG / BRSNR';
 
 // Dimensions aggregated into the permanent trend summary server-side.
-// seal_number is intentionally excluded (near-unique per shipment — see
-// Code.gs for the full rationale) so it's flagged specially in the UI.
+// Must mirror Code.gs TREND_FILTER_DIMENSIONS exactly (used for local-mode
+// aggregation so the dashboard behaves identically with or without the API).
 const TREND_FILTER_DIMENSIONS = [
   'region', 'manifest_code', 'shipment_type', 'item_status_text',
   'manifest_status_text', 'manifest_origin_name', 'manifest_origin_type',
   'manifest_destination_name', 'manifest_destination_type', 'client_name',
-  'client_category', 'order_type'
+  'client_category', 'order_type',
+  'bin_level', 'rejection_category', 'volumetric_flag', 'doh_flag'
 ];
 
 // Fields shown in the "Select more filters" drawer (order matters).
 const DRAWER_FIELDS = [
   { key: 'region', label: 'Region' },
+  { key: 'volumetric_flag', label: 'Volumetric Flag' },
   { key: 'manifest_code', label: 'Manifest Code' },
   { key: 'shipment_type', label: 'Shipment Type' },
   { key: 'item_status_text', label: 'Item Status' },
+  { key: 'bin_level', label: 'Bin Level' },
+  { key: 'rejection_category', label: 'Rejection Category' },
+  { key: 'doh_flag', label: 'DOH Flag' },
   { key: 'seal_number', label: 'Seal Number (recent data only)' },
   { key: 'manifest_status_text', label: 'Manifest Status' },
   { key: 'manifest_origin_name', label: 'Manifest Origin' },
@@ -518,6 +560,10 @@ const state = {
     Reverse: { pivot: 'All', aging_after_bag_received: 'All', location_name: 'All', awb_search: '' }
   },
   drawerOpen: { Forward: false, Reverse: false },
+  // Drill-down navigation stack per direction. Each entry:
+  //   { groupBy, filters:{...}, label } describing one level of drill-down.
+  // Empty = showing the top-level pivot summary only.
+  drilldown: { Forward: [], Reverse: [] },
   charts: {}
 };
 
@@ -613,9 +659,29 @@ function computeReversePivot(row) {
   return null;
 }
 
+// Returns the pivot bucket for a row, or null if it doesn't belong to any.
+// Handles three category paths:
+//   - 'IN BAG / BRSNR'            -> BRSNR-family pivots (status/origin/dest logic)
+//   - 'IN BAG / At Dock'          -> 'At Dock'
+//   - 'NOT IN BAG / Received at DC' -> 'Rec At DC'
+function computePivot(direction, row) {
+  const category = normVal(row.category);
+  if (category === CATEGORY_FILTER) {
+    return direction === 'Forward' ? computeForwardPivot(row) : computeReversePivot(row);
+  }
+  if (CATEGORY_PIVOTS[category]) return CATEGORY_PIVOTS[category];
+  return null;
+}
+
+// Volumetric shipments are identified by a manifest_code beginning with "DH"
+// (case-insensitive). Everything else is treated as non-volumetric.
+function computeVolumetricFlag(row) {
+  const mc = normVal(row.manifest_code).toUpperCase();
+  return mc.startsWith('DH') ? 'Volumetric' : 'Non-Volumetric';
+}
+
 function processRow(direction, baseDate, row) {
-  if (normVal(row.category) !== CATEGORY_FILTER) return null;
-  const pivotVal = direction === 'Forward' ? computeForwardPivot(row) : computeReversePivot(row);
+  const pivotVal = computePivot(direction, row);
   if (!pivotVal) return null;
   const ageing = calendarDayDiff(baseDate, row.manifest_received_time_ist);
   if (ageing === null) return null;
@@ -623,11 +689,17 @@ function processRow(direction, baseDate, row) {
   if (ageing < range[0] || ageing > range[1]) return null;
 
   const rec = {};
-  RAW_COLUMNS.forEach(c => { rec[c] = normVal(row[c]); });
+  RAW_COLUMNS_CORE.forEach(c => { rec[c] = normVal(row[c]); });
+  RAW_COLUMNS_EXTRA.forEach(c => { rec[c] = normVal(row[c]); });
+  rec.volumetric_flag = computeVolumetricFlag(row);
   rec.pivot = pivotVal;
   rec.aging_after_bag_received = ageing;
   rec.base_date = baseDate;
   rec.direction = direction;
+  // Whether this row falls on a checkpoint ageing day (=> its detailed
+  // AWB-level record should be persisted to the raw sheet). All rows,
+  // checkpoint or not, still contribute to the aggregated trend summary.
+  rec.is_checkpoint = STORE_AGE_DAYS[direction].indexOf(ageing) !== -1;
   return rec;
 }
 
@@ -747,6 +819,66 @@ function aggregateLocalTrend(records, activeFilters) {
     grouped[key].count += 1;
   });
   return Object.values(grouped);
+}
+
+// Fetches drill-down data: groups the (filtered) trend summary by `groupBy`,
+// returning { dates, groups:[{value,total,rows:[{base_date,count}]}] }.
+// Works against the live API (getDrilldown) or local session data.
+async function fetchDrilldown(direction, groupBy, filters) {
+  const params = Object.assign({ direction, groupBy }, filters);
+  if (apiLive()) {
+    try {
+      return await apiGet('getDrilldown', params);
+    } catch (err) {
+      state.apiStatus = 'error'; renderApiStatus();
+    }
+  }
+  const rows = state.localRaw[direction].filter(r => {
+    for (const k in filters) {
+      if (k === 'direction' || k === 'groupBy') continue;
+      const v = filters[k];
+      if (v === undefined || v === '' || v === 'All') continue;
+      const rowVal = k === 'aging_after_bag_received' ? String(r.aging_after_bag_received) : String(r[k] || '');
+      if (rowVal !== String(v)) return false;
+    }
+    return true;
+  });
+  const dateSet = {}, groups = {};
+  rows.forEach(r => {
+    const gv = String(r[groupBy] || '(blank)');
+    if (!groups[gv]) groups[gv] = { value: gv, total: 0, byDate: {} };
+    groups[gv].total += 1;
+    groups[gv].byDate[r.base_date] = (groups[gv].byDate[r.base_date] || 0) + 1;
+    dateSet[r.base_date] = true;
+  });
+  const dates = Object.keys(dateSet).sort();
+  const out = Object.keys(groups).map(v => {
+    const g = groups[v];
+    return { value: g.value, total: g.total, rows: dates.map(d => ({ base_date: d, count: g.byDate[d] || 0 })) };
+  });
+  out.sort((a, b) => b.total - a.total);
+  return { direction, groupBy, dates, groups: out };
+}
+
+// Drill-down hierarchy per pivot. Rec At DC: location -> bin -> rejection.
+// At Dock: location -> volumetric. All others: pivot -> location.
+function drilldownChildDimension(pivot, currentGroupBy) {
+  const chains = {
+    'Rec At DC': ['location_name', 'bin_level', 'rejection_category'],
+    'At Dock': ['location_name', 'volumetric_flag']
+  };
+  const chain = chains[pivot] || ['location_name'];
+  if (!currentGroupBy) return chain[0];
+  const idx = chain.indexOf(currentGroupBy);
+  if (idx === -1 || idx + 1 >= chain.length) return null;
+  return chain[idx + 1];
+}
+
+function dimensionLabel(dim) {
+  const found = DRAWER_FIELDS.find(f => f.key === dim);
+  if (found) return found.label;
+  if (dim === 'location_name') return 'Location';
+  return dim;
 }
 
 function activeFilterParams(direction) {
@@ -1010,7 +1142,7 @@ function buildSectionDOM(direction, bucket) {
   return wrap;
 }
 
-function renderChart(direction, bucket, bucketTrendRows, allDates) {
+function renderChart(direction, bucket, bucketTrendRows, allDates, multiDatasets) {
   const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
   const canvas = document.getElementById('chart-' + safeId);
   if (!canvas) return;
@@ -1023,24 +1155,38 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
   if (state.charts[key]) { try { state.charts[key].destroy(); } catch (e) {} state.charts[key] = null; }
 
   const color = chartColor(PIVOTS[direction].indexOf(bucket));
-  const singlePoint = allDates.length < 2;
+  const singlePoint = allDates.length < 2 && !multiDatasets;
 
-  // Draw once layout has settled so the container reports a real width. We
-  // then EXPLICITLY size the canvas (both the CSS box and the backing pixel
-  // buffer) and disable Chart.js responsive auto-sizing. Relying on
-  // responsive:true was the root cause of the blank charts: if the parent's
-  // measured size was 0 at creation time, Chart.js drew a zero-size canvas.
+  // Build datasets: either the single bucket series, or the region-mode
+  // per-location series + a dotted average line.
+  let datasets;
+  if (multiDatasets && multiDatasets.length) {
+    datasets = multiDatasets;
+  } else {
+    datasets = [{
+      label: bucket,
+      data: data,
+      borderColor: color,
+      backgroundColor: singlePoint ? color + 'cc' : color + '33',
+      fill: !singlePoint,
+      tension: 0.25,
+      pointRadius: 4,
+      pointHoverRadius: 6,
+      pointBackgroundColor: color,
+      borderWidth: 2,
+      spanGaps: true,
+      maxBarThickness: 80
+    }];
+  }
+
   const draw = () => {
-    const box = canvas.parentElement; // .chart-box
+    const box = canvas.parentElement;
     if (!box) return;
     const cssW = Math.max(box.clientWidth || 0, 300);
     const cssH = Math.max(box.clientHeight || 0, 260);
     const dpr = window.devicePixelRatio || 1;
     canvas.style.width = cssW + 'px';
     canvas.style.height = cssH + 'px';
-    // Set the CSS-pixel size only. Chart.js multiplies these by
-    // options.devicePixelRatio itself; doing it here as well squared the
-    // ratio and rendered everything at half scale on retina/150% displays.
     canvas.width = Math.round(cssW);
     canvas.height = Math.round(cssH);
 
@@ -1048,7 +1194,6 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
       showChartError(box, 'Chart library failed to load (blocked or offline). Check the network tab for chart.umd.min.js.');
       return;
     }
-
     let ctx;
     try { ctx = canvas.getContext('2d'); } catch (e) { showChartError(box, 'Chart could not initialise.'); return; }
     if (!ctx) { showChartError(box, 'Chart could not initialise.'); return; }
@@ -1056,30 +1201,14 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
     try {
       const chart = new Chart(ctx, {
         type: singlePoint ? 'bar' : 'line',
-        data: {
-          labels: allDates.map(fmtDisplayDate),
-          datasets: [{
-            label: bucket,
-            data: data,
-            borderColor: color,
-            backgroundColor: singlePoint ? color + 'cc' : color + '33',
-            fill: !singlePoint,
-            tension: 0.25,
-            pointRadius: 4,
-            pointHoverRadius: 6,
-            pointBackgroundColor: color,
-            borderWidth: 2,
-            spanGaps: true,
-            maxBarThickness: 80
-          }]
-        },
+        data: { labels: allDates.map(fmtDisplayDate), datasets: datasets },
         options: {
-          responsive: false,          // we size the canvas ourselves (see above)
+          responsive: false,
           maintainAspectRatio: false,
           devicePixelRatio: dpr,
           animation: false,
           plugins: {
-            legend: { display: false },
+            legend: { display: !!multiDatasets, position: 'bottom', labels: { boxWidth: 12, font: { size: 10 }, color: '#5f7268' } },
             tooltip: { callbacks: { title: (items) => items.length ? allDates[items[0].dataIndex] : '' } }
           },
           scales: {
@@ -1095,11 +1224,6 @@ function renderChart(direction, bucket, bucketTrendRows, allDates) {
     }
   };
 
-  // Draw once layout has flushed. Two rAFs give the browser a chance to
-  // measure the container, but rAF NEVER fires while the tab is hidden
-  // (background tab, restored session, page opened in a new tab), which
-  // left the charts permanently undrawn. So we also arm a setTimeout and
-  // let whichever fires first win.
   let drawn = false;
   const drawOnce = () => { if (drawn) return; drawn = true; draw(); };
   if (typeof requestAnimationFrame === 'function') {
@@ -1191,7 +1315,8 @@ function renderPivotSummary(direction, trendRows, allDates) {
   let tbody = '<tbody>';
   const colTotals = {}; allDates.forEach(d => colTotals[d] = 0);
   buckets.forEach(b => {
-    tbody += `<tr><td class="sticky-col">${escapeHtml(b)}</td>`;
+    tbody += `<tr class="drill-row" data-pivot="${escapeAttr(b)}" title="Click to see ${escapeAttr(dimensionLabel(drilldownChildDimension(b, null)))} breakdown">`;
+    tbody += `<td class="sticky-col"><span class="drill-caret">▸</span> ${escapeHtml(b)}</td>`;
     allDates.forEach(d => {
       const v = grid[b][d];
       colTotals[d] += v;
@@ -1206,9 +1331,116 @@ function renderPivotSummary(direction, trendRows, allDates) {
   tfoot += '</tr></tfoot>';
 
   el.innerHTML = `
-    <div class="bucket-head"><h3>Pivot Summary — Day on Day</h3></div>
+    <div class="bucket-head">
+      <h3>Pivot Summary — Day on Day</h3>
+      <span class="muted" style="font-size:12px;">Click a pivot row to drill down</span>
+    </div>
     <div class="table-scroll"><table class="pivot-table">${thead}${tbody}${tfoot}</table></div>
+    <div id="drilldown-${direction}" class="drilldown-panel"></div>
   `;
+
+  // Wire pivot-row clicks to start a fresh drill-down.
+  el.querySelectorAll('.drill-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const pivot = tr.getAttribute('data-pivot');
+      const childDim = drilldownChildDimension(pivot, null);
+      state.drilldown[direction] = [{
+        groupBy: childDim,
+        filters: Object.assign({}, activeFilterParams(direction), { pivot }),
+        label: pivot,
+        pivot: pivot
+      }];
+      renderDrilldown(direction);
+    });
+  });
+
+  // Re-render any active drill-down (e.g. after a data refresh).
+  if (state.drilldown[direction].length) renderDrilldown(direction);
+}
+
+// Renders the current drill-down stack: a breadcrumb + a table of the deepest
+// level's groups (each row = a group value with per-date counts), where each
+// row can be clicked to drill further if the hierarchy allows.
+async function renderDrilldown(direction) {
+  const panel = document.getElementById('drilldown-' + direction);
+  if (!panel) return;
+  const stack = state.drilldown[direction];
+  if (!stack.length) { panel.innerHTML = ''; return; }
+
+  const level = stack[stack.length - 1];
+  panel.innerHTML = '<div class="muted" style="padding:10px 0;">Loading breakdown…</div>';
+
+  let data;
+  try {
+    data = await fetchDrilldown(direction, level.groupBy, level.filters);
+  } catch (err) {
+    panel.innerHTML = `<div class="status-banner status-error" style="display:block;">Could not load drill-down: ${escapeHtml(err.message)}</div>`;
+    return;
+  }
+
+  // Breadcrumb
+  const crumbs = ['<span class="crumb" data-idx="-1">Pivot Summary</span>'];
+  stack.forEach((lvl, i) => {
+    crumbs.push('<span class="crumb-sep">›</span>');
+    crumbs.push(`<span class="crumb" data-idx="${i}">${escapeHtml(lvl.label)}</span>`);
+  });
+
+  const dates = data.dates;
+  const childDim = drilldownChildDimension(level.pivot, level.groupBy);
+
+  let thead = `<thead><tr><th class="sticky-col">${escapeHtml(dimensionLabel(level.groupBy))}</th>`;
+  dates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
+  thead += '<th>Total</th></tr></thead>';
+
+  let tbody = '<tbody>';
+  data.groups.forEach(g => {
+    const clickable = !!childDim;
+    tbody += `<tr class="${clickable ? 'drill-row' : ''}" data-value="${escapeAttr(g.value)}" ${clickable ? `title="Click for ${escapeAttr(dimensionLabel(childDim))} breakdown"` : ''}>`;
+    tbody += `<td class="sticky-col">${clickable ? '<span class="drill-caret">▸</span> ' : ''}${escapeHtml(g.value)}</td>`;
+    dates.forEach(d => {
+      const row = g.rows.find(x => x.base_date === d);
+      const v = row ? row.count : 0;
+      tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
+    });
+    tbody += `<td><strong>${fmtInt(g.total)}</strong></td></tr>`;
+  });
+  tbody += '</tbody>';
+
+  panel.innerHTML = `
+    <div class="drilldown-breadcrumb">${crumbs.join(' ')}</div>
+    <div class="bucket-head" style="margin-top:8px;">
+      <h4 style="margin:0;">${escapeHtml(level.label)} — by ${escapeHtml(dimensionLabel(level.groupBy))}</h4>
+      ${childDim ? `<span class="muted" style="font-size:12px;">Click a row to drill into ${escapeHtml(dimensionLabel(childDim))}</span>` : '<span class="muted" style="font-size:12px;">Deepest level</span>'}
+    </div>
+    <div class="table-scroll"><table class="pivot-table">${thead}${tbody}</table></div>
+  `;
+
+  // Breadcrumb navigation
+  panel.querySelectorAll('.crumb').forEach(c => {
+    c.addEventListener('click', () => {
+      const idx = parseInt(c.getAttribute('data-idx'), 10);
+      state.drilldown[direction] = idx < 0 ? [] : stack.slice(0, idx + 1);
+      renderDrilldown(direction);
+    });
+  });
+
+  // Row clicks -> drill one level deeper
+  if (childDim) {
+    panel.querySelectorAll('.drill-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const value = tr.getAttribute('data-value');
+        const newFilters = Object.assign({}, level.filters);
+        newFilters[level.groupBy] = value;
+        state.drilldown[direction] = stack.concat([{
+          groupBy: childDim,
+          filters: newFilters,
+          label: value,
+          pivot: level.pivot
+        }]);
+        renderDrilldown(direction);
+      });
+    });
+  }
 }
 
 function updateKPIs(direction, filteredCount) {
@@ -1260,14 +1492,78 @@ async function renderDashboard(direction) {
   bucketsToShow.forEach(bucket => {
     container.appendChild(buildSectionDOM(direction, bucket));
   });
-  bucketsToShow.forEach(bucket => {
+
+  const regionSelected = state.filters[direction].region && state.filters[direction].region !== 'All';
+
+  for (const bucket of bucketsToShow) {
     const bucketRows = trendRows.filter(r => r.pivot === bucket);
-    renderChart(direction, bucket, bucketRows, allDates);
+    if (regionSelected) {
+      // Region mode: one trend line per location in the region + dotted average.
+      await renderRegionChart(direction, bucket, allDates);
+    } else {
+      renderChart(direction, bucket, bucketRows, allDates);
+    }
     renderTable(direction, bucket, bucketRows, allDates);
-  });
+  }
 
   updateKPIs(direction, filteredCount);
   renderUploadsList(direction);
+}
+
+// Region mode: draws one line per location mapped to the selected region for
+// this bucket, plus a dotted line for the region-wide average across
+// locations. Uses the drill-down endpoint (group by location_name).
+async function renderRegionChart(direction, bucket, allDates) {
+  const filters = Object.assign({}, activeFilterParams(direction), { pivot: bucket });
+  let data;
+  try {
+    data = await fetchDrilldown(direction, 'location_name', filters);
+  } catch (err) {
+    const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
+    const box = document.getElementById('chart-' + safeId);
+    if (box && box.parentElement) showChartError(box.parentElement, 'Could not load region breakdown: ' + err.message);
+    return;
+  }
+  const dates = data.dates.length ? data.dates : allDates;
+  const palette = ['#17b26a', '#d97706', '#2563eb', '#c53a2e', '#8b5cf6', '#0e9488', '#e11d48', '#65a30d', '#0891b2', '#9333ea'];
+
+  // Per-location datasets
+  const locDatasets = data.groups.map((g, i) => {
+    const c = palette[i % palette.length];
+    return {
+      label: g.value,
+      data: dates.map(d => { const row = g.rows.find(x => x.base_date === d); return row ? row.count : 0; }),
+      borderColor: c,
+      backgroundColor: c + '22',
+      fill: false,
+      tension: 0.25,
+      pointRadius: 2,
+      pointHoverRadius: 5,
+      borderWidth: 1.5,
+      spanGaps: true
+    };
+  });
+
+  // Dotted average line: mean across locations per date.
+  const avgData = dates.map(d => {
+    const vals = data.groups.map(g => { const row = g.rows.find(x => x.base_date === d); return row ? row.count : 0; });
+    if (!vals.length) return 0;
+    return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+  });
+  const avgDataset = {
+    label: 'Region Average',
+    data: avgData,
+    borderColor: '#111827',
+    backgroundColor: 'transparent',
+    borderDash: [6, 4],
+    fill: false,
+    tension: 0.25,
+    pointRadius: 3,
+    pointHoverRadius: 6,
+    borderWidth: 2
+  };
+
+  renderChart(direction, bucket, [], dates, locDatasets.concat([avgDataset]));
 }
 
 function renderUploadsList(direction) {
@@ -1486,6 +1782,8 @@ async function downloadMasterData() {
 
 function initMasterDataControls() {
   document.getElementById('download-master-btn').addEventListener('click', downloadMasterData);
+  const rawBtn = document.getElementById('download-raw-numbers-btn');
+  if (rawBtn) rawBtn.addEventListener('click', downloadRawNumbers);
   document.getElementById('load-master-input').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1502,6 +1800,63 @@ function initMasterDataControls() {
     });
     e.target.value = '';
   });
+}
+
+// Downloads the day-on-day NUMBERS shown in the Pivot Summary (per pivot),
+// plus the location-wise breakdown for each pivot, for the active tab. This
+// is the aggregated trend view, not raw AWB rows — small and filter-aware.
+async function downloadRawNumbers() {
+  const btn = document.getElementById('download-raw-numbers-btn');
+  const orig = btn.textContent; btn.textContent = 'Preparing…'; btn.disabled = true;
+  try {
+    const direction = getActiveDirection();
+    const trendRows = state.trends[direction] || [];
+    if (!trendRows.length) { alert('No numbers to download for the ' + direction + ' tab yet.'); return; }
+    const allDates = Array.from(new Set(trendRows.map(r => r.base_date))).sort();
+
+    // Level 1: pivot × date
+    const pivotGrid = {};
+    PIVOTS[direction].forEach(p => { pivotGrid[p] = {}; allDates.forEach(d => pivotGrid[p][d] = 0); });
+    trendRows.forEach(r => { if (pivotGrid[r.pivot]) pivotGrid[r.pivot][r.base_date] += Number(r.count); });
+
+    const rows = [];
+    PIVOTS[direction].forEach(p => {
+      const row = { level: 'Pivot', pivot: p, location_name: '' };
+      allDates.forEach(d => { row[fmtDisplayDate(d)] = pivotGrid[p][d]; });
+      row.Total = allDates.reduce((s, d) => s + pivotGrid[p][d], 0);
+      rows.push(row);
+    });
+
+    // Level 2: pivot × location × date (from drill-down)
+    for (const p of PIVOTS[direction]) {
+      const filters = Object.assign({}, activeFilterParams(direction), { pivot: p });
+      const dd = await fetchDrilldown(direction, 'location_name', filters);
+      dd.groups.forEach(g => {
+        const row = { level: 'Location', pivot: p, location_name: g.value };
+        allDates.forEach(d => { const rr = g.rows.find(x => x.base_date === d); row[fmtDisplayDate(d)] = rr ? rr.count : 0; });
+        row.Total = g.total;
+        rows.push(row);
+      });
+    }
+
+    const cols = ['level', 'pivot', 'location_name'].concat(allDates.map(fmtDisplayDate)).concat(['Total']);
+    const csv = Papa.unparse(rows, { columns: cols });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const urlObj = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = urlObj; a.download = `${direction}_Raw_Numbers.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(urlObj);
+  } catch (err) {
+    alert('Could not download raw numbers: ' + err.message);
+  } finally {
+    btn.textContent = orig; btn.disabled = false;
+  }
+}
+
+function getActiveDirection() {
+  const activeTab = document.querySelector('.tab-btn.active');
+  return activeTab && activeTab.dataset.tab === 'Reverse' ? 'Reverse' : 'Forward';
 }
 
 /* ---------------------------- API SETTINGS UI ------------------------------ */
@@ -1574,6 +1929,7 @@ async function init() {
 }
 
 document.addEventListener('DOMContentLoaded', () => { init(); });
+
 
 </script>
 </body>
