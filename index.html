@@ -502,8 +502,10 @@ const CATEGORY_FILTER = 'IN BAG / BRSNR';
 
 // Dimensions aggregated into the permanent trend summary server-side.
 // Must mirror Code.gs TREND_FILTER_DIMENSIONS exactly (used for local-mode
-// aggregation so the dashboard behaves identically with or without the API).
+// aggregation AND for the trend-summary the client POSTs). location_name MUST
+// be included here or it is dropped from every trend row (shows as "(blank)").
 const TREND_FILTER_DIMENSIONS = [
+  'location_name',
   'region', 'manifest_code', 'shipment_type', 'item_status_text',
   'manifest_status_text', 'manifest_origin_name', 'manifest_origin_type',
   'manifest_destination_name', 'manifest_destination_type', 'client_name',
@@ -1178,8 +1180,9 @@ function renderChart(direction, bucket, bucketTrendRows, allDates, multiDatasets
   const color = chartColor(PIVOTS[direction].indexOf(bucket));
   const singlePoint = allDates.length < 2 && !multiDatasets;
 
-  // Build datasets: either the single bucket series, or the region-mode
-  // per-location series + a dotted average line.
+  // Always a line chart (per requirement — no bars). For a single date there's
+  // no segment to draw, so we show a larger point marker so the value is still
+  // clearly visible as a dot.
   let datasets;
   if (multiDatasets && multiDatasets.length) {
     datasets = multiDatasets;
@@ -1188,15 +1191,14 @@ function renderChart(direction, bucket, bucketTrendRows, allDates, multiDatasets
       label: bucket,
       data: data,
       borderColor: color,
-      backgroundColor: singlePoint ? color + 'cc' : color + '33',
-      fill: !singlePoint,
+      backgroundColor: color + '33',
+      fill: true,
       tension: 0.25,
-      pointRadius: 4,
-      pointHoverRadius: 6,
+      pointRadius: singlePoint ? 6 : 4,
+      pointHoverRadius: singlePoint ? 8 : 6,
       pointBackgroundColor: color,
       borderWidth: 2,
-      spanGaps: true,
-      maxBarThickness: 80
+      spanGaps: true
     }];
   }
 
@@ -1221,7 +1223,7 @@ function renderChart(direction, bucket, bucketTrendRows, allDates, multiDatasets
 
     try {
       const chart = new Chart(ctx, {
-        type: singlePoint ? 'bar' : 'line',
+        type: 'line',
         data: { labels: allDates.map(fmtDisplayDate), datasets: datasets },
         options: {
           responsive: false,
