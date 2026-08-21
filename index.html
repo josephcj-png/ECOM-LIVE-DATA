@@ -821,6 +821,27 @@ function aggregateLocalTrend(records, activeFilters) {
   return Object.values(grouped);
 }
 
+// Aggregates records into the FULL trend-summary shape the backend stores
+// (base_date, pivot, aging, all TREND_FILTER_DIMENSIONS, count). This is
+// computed in the browser so the huge raw payload never has to be POSTed in
+// full — only this compact summary plus the checkpoint-day raw rows are sent.
+function aggregateTrendSummary(records) {
+  const grouped = {};
+  records.forEach(r => {
+    const keyParts = [r.base_date, r.pivot, r.aging_after_bag_received]
+      .concat(TREND_FILTER_DIMENSIONS.map(d => r[d] || ''));
+    const key = keyParts.join('\u0001');
+    if (!grouped[key]) {
+      const row = { base_date: r.base_date, pivot: r.pivot, aging_after_bag_received: r.aging_after_bag_received };
+      TREND_FILTER_DIMENSIONS.forEach(d => { row[d] = r[d] || ''; });
+      row.count = 0;
+      grouped[key] = row;
+    }
+    grouped[key].count += 1;
+  });
+  return Object.values(grouped);
+}
+
 // Fetches drill-down data: groups the (filtered) trend summary by `groupBy`,
 // returning { dates, groups:[{value,total,rows:[{base_date,count}]}] }.
 // Works against the live API (getDrilldown) or local session data.
@@ -1702,7 +1723,6 @@ async function startUpload(direction, file, dateOverride) {
 }
 
 async function finishUpload(direction, file, buffer, totalRows) {
-  // baseDate is embedded in every processed record already.
   const baseDate = buffer.length ? buffer[0].base_date : (extractDateFromFilename(file.name, new Date().getFullYear()));
   if (!baseDate) {
     setStatus(direction, `Error: could not determine base date for "${file.name}".`, 'error');
@@ -1711,10 +1731,8 @@ async function finishUpload(direction, file, buffer, totalRows) {
   commitLocalBuffer(direction, baseDate, buffer, totalRows, file.name);
 
   if (apiConfigured()) {
-    setStatus(direction, `Uploading ${fmtInt(buffer.length)} records for ${fmtDisplayDate(baseDate)} to Google Sheets...`, 'info');
     try {
-      const result = await apiPost('uploadBase', { direction, baseDate, records: buffer });
-      setStatus(direction, `Done: "${file.name}" — ${fmtInt(result.recordsStored)} pendency records stored for ${fmtDisplayDate(baseDate)} (from ${fmtInt(totalRows)} rows).`, 'success');
+      await syncUploadToApi(direction, baseDate, buffer, file, totalRows);
     } catch (err) {
       setStatus(direction, `Saved locally, but could not sync to Google Sheets: ${err.message}`, 'error');
     }
@@ -1726,6 +1744,47 @@ async function finishUpload(direction, file, buffer, totalRows) {
     refreshFilterUI(direction);
   }
   await renderDashboard(direction);
+}
+
+// Uploads a processed base to the API without ever sending the full raw
+// dataset in one request (that can be 100+ MB and exceeds Apps Script's
+// 50MB POST limit / 6-min execution cap — the cause of the stuck upload).
+//
+// Protocol:
+//   1. POST the compact TREND SUMMARY (counts per pivot×ageing×dimensions)
+//      with mode:'replace' — this is what the whole dashboard reads, and it's
+//      small (a few thousand rows even for 200k+ AWBs).
+//   2. POST the CHECKPOINT-DAY raw rows in chunks (append) — only ageing days
+//      3/6/10/15 (fwd) or 3/6/15/20 (rev), a fraction of the full data.
+// Each POST stays well under the size/time limits.
+async function syncUploadToApi(direction, baseDate, buffer, file, totalRows) {
+  const trendRows = aggregateTrendSummary(buffer);
+  const checkpointDays = STORE_AGE_DAYS[direction];
+  const rawRows = buffer.filter(r => checkpointDays.indexOf(Number(r.aging_after_bag_received)) !== -1);
+
+  // Step 1: trend summary (single small POST, replaces this date).
+  setStatus(direction, `Uploading trend summary for ${fmtDisplayDate(baseDate)} (${fmtInt(trendRows.length)} rows)…`, 'info');
+  await apiPost('uploadTrends', { direction, baseDate, trends: trendRows });
+
+  // Step 2: checkpoint raw rows in chunks.
+  const CHUNK = 4000;
+  const totalChunks = Math.max(1, Math.ceil(rawRows.length / CHUNK));
+  // First chunk replaces existing raw for this date; subsequent chunks append.
+  for (let i = 0; i < rawRows.length; i += CHUNK) {
+    const chunk = rawRows.slice(i, i + CHUNK);
+    const chunkIndex = Math.floor(i / CHUNK);
+    setStatus(direction, `Uploading detailed rows for ${fmtDisplayDate(baseDate)} — chunk ${chunkIndex + 1}/${totalChunks} (${fmtInt(Math.min(i + CHUNK, rawRows.length))}/${fmtInt(rawRows.length)})…`, 'info');
+    await apiPost('uploadRawChunk', {
+      direction, baseDate, records: chunk,
+      mode: chunkIndex === 0 ? 'replace' : 'append'
+    });
+  }
+  // If there were zero checkpoint rows, still clear any stale raw for the date.
+  if (rawRows.length === 0) {
+    await apiPost('uploadRawChunk', { direction, baseDate, records: [], mode: 'replace' });
+  }
+
+  setStatus(direction, `Done: "${file.name}" — ${fmtInt(trendRows.length)} trend rows + ${fmtInt(rawRows.length)} checkpoint rows stored for ${fmtDisplayDate(baseDate)} (from ${fmtInt(totalRows)} rows).`, 'success');
 }
 
 function initUploadControls(direction) {
