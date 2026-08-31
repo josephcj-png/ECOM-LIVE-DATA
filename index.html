@@ -504,20 +504,31 @@ const CATEGORY_FILTER = 'IN BAG / BRSNR';
 // Must mirror Code.gs TREND_FILTER_DIMENSIONS exactly (used for local-mode
 // aggregation AND for the trend-summary the client POSTs). location_name MUST
 // be included here or it is dropped from every trend row (shows as "(blank)").
+// ONLY LOW-CARDINALITY dimensions belong here. The trend sheet stores one row
+// per unique combination of (base_date, pivot, ageing, ...these dims), so any
+// near-unique field destroys the aggregation. Measured on a real 22.6k-row
+// base file: adding manifest_code alone took the summary from 2,319 rows to
+// 15,808 (70% of raw — barely a summary at all). manifest_code (15,164 unique
+// values), manifest_origin_name (1,532) and client_name (254) are therefore
+// deliberately EXCLUDED — that is a 7x reduction in stored trend rows.
+// Filtering on those three still works, but only against the retained
+// checkpoint-day raw data, not full history.
 const TREND_FILTER_DIMENSIONS = [
-  'location_name',
-  'region', 'manifest_code', 'shipment_type', 'item_status_text',
-  'manifest_status_text', 'manifest_origin_name', 'manifest_origin_type',
-  'manifest_destination_name', 'manifest_destination_type', 'client_name',
-  'client_category', 'order_type',
-  'bin_level', 'rejection_category', 'volumetric_flag', 'doh_flag'
+  'location_name', 'region',
+  'bin_level', 'rejection_category', 'volumetric_flag',
+  'order_type', 'item_status_text',
+  'manifest_origin_type', 'manifest_destination_type', 'doh_flag'
 ];
+
+// Drawer filters that are NOT in the trend summary — they only apply to the
+// retained checkpoint-day raw data. Labelled in the UI so it's not a surprise.
+const RAW_ONLY_FILTERS = ['manifest_code', 'manifest_origin_name', 'client_name', 'seal_number', 'manifest_destination_name', 'shipment_type', 'client_category', 'manifest_status_text'];
 
 // Fields shown in the "Select more filters" drawer (order matters).
 const DRAWER_FIELDS = [
   { key: 'region', label: 'Region' },
   { key: 'volumetric_flag', label: 'Volumetric Flag' },
-  { key: 'manifest_code', label: 'Manifest Code' },
+  { key: 'manifest_code', label: 'Manifest Code (recent data only)' },
   { key: 'shipment_type', label: 'Shipment Type' },
   { key: 'item_status_text', label: 'Item Status' },
   { key: 'bin_level', label: 'Bin Level' },
@@ -525,11 +536,11 @@ const DRAWER_FIELDS = [
   { key: 'doh_flag', label: 'DOH Flag' },
   { key: 'seal_number', label: 'Seal Number (recent data only)' },
   { key: 'manifest_status_text', label: 'Manifest Status' },
-  { key: 'manifest_origin_name', label: 'Manifest Origin' },
+  { key: 'manifest_origin_name', label: 'Manifest Origin (recent data only)' },
   { key: 'manifest_origin_type', label: 'Origin Type' },
   { key: 'manifest_destination_name', label: 'Manifest Destination' },
   { key: 'manifest_destination_type', label: 'Destination Type' },
-  { key: 'client_name', label: 'Client Name' },
+  { key: 'client_name', label: 'Client Name (recent data only)' },
   { key: 'client_category', label: 'Client Category' },
   { key: 'order_type', label: 'Order Type' }
 ];
