@@ -301,6 +301,17 @@ tr.drill-row:hover td { background: #eef7f1; }
 }
 
 
+
+/* ---------- Day / location hierarchy in per-bucket tables ---------- */
+table.pivot-table tr.day-row td {
+  background: #eef3ef;
+  font-weight: 700;
+  color: var(--text);
+}
+table.pivot-table tr.day-row td.sticky-col { background: #e4ece7; }
+table.pivot-table tr.loc-row td { color: var(--text-dim); }
+table.pivot-table tr.loc-row td.loc-cell { padding-left: 26px; font-style: normal; }
+table.pivot-table tr.loc-row:hover td { background: #f4f9f6; }
 </style>
 </head>
 <body>
@@ -514,36 +525,35 @@ const CATEGORY_FILTER = 'IN BAG / BRSNR';
 // Filtering on those three still works, but only against the retained
 // checkpoint-day raw data, not full history.
 const TREND_FILTER_DIMENSIONS = [
-  'location_name', 'region', 'manifest_code', 'shipment_type',
-  'item_status_text', 'manifest_status_text', 'manifest_origin_name',
-  'manifest_origin_type', 'manifest_destination_name',
-  'manifest_destination_type', 'client_name', 'client_category', 'order_type',
-  'bin_level', 'rejection_category', 'volumetric_flag', 'doh_flag'
+  'location_name', 'region',
+  'bin_level', 'rejection_category', 'volumetric_flag'
 ];
 
 // Drawer filters that are NOT in the trend summary — they only apply to the
 // retained checkpoint-day raw data. Labelled in the UI so it's not a surprise.
-const RAW_ONLY_FILTERS = ['seal_number'];
+const RAW_ONLY_FILTERS = ['manifest_code', 'shipment_type', 'item_status_text', 'doh_flag',
+  'seal_number', 'manifest_status_text', 'manifest_origin_name', 'manifest_origin_type',
+  'manifest_destination_name', 'manifest_destination_type', 'client_name', 'client_category', 'order_type'];
 
 // Fields shown in the "Select more filters" drawer (order matters).
 const DRAWER_FIELDS = [
   { key: 'region', label: 'Region' },
   { key: 'volumetric_flag', label: 'Volumetric Flag' },
-  { key: 'manifest_code', label: 'Manifest Code' },
-  { key: 'shipment_type', label: 'Shipment Type' },
-  { key: 'item_status_text', label: 'Item Status' },
+  { key: 'manifest_code', label: 'Manifest Code (recent data only)' },
+  { key: 'shipment_type', label: 'Shipment Type (recent data only)' },
+  { key: 'item_status_text', label: 'Item Status (recent data only)' },
   { key: 'bin_level', label: 'Bin Level' },
   { key: 'rejection_category', label: 'Rejection Category' },
-  { key: 'doh_flag', label: 'DOH Flag' },
+  { key: 'doh_flag', label: 'DOH Flag (recent data only)' },
   { key: 'seal_number', label: 'Seal Number (recent data only)' },
-  { key: 'manifest_status_text', label: 'Manifest Status' },
-  { key: 'manifest_origin_name', label: 'Manifest Origin' },
-  { key: 'manifest_origin_type', label: 'Origin Type' },
-  { key: 'manifest_destination_name', label: 'Manifest Destination' },
-  { key: 'manifest_destination_type', label: 'Destination Type' },
-  { key: 'client_name', label: 'Client Name' },
-  { key: 'client_category', label: 'Client Category' },
-  { key: 'order_type', label: 'Order Type' }
+  { key: 'manifest_status_text', label: 'Manifest Status (recent data only)' },
+  { key: 'manifest_origin_name', label: 'Manifest Origin (recent data only)' },
+  { key: 'manifest_origin_type', label: 'Origin Type (recent data only)' },
+  { key: 'manifest_destination_name', label: 'Manifest Destination (recent data only)' },
+  { key: 'manifest_destination_type', label: 'Destination Type (recent data only)' },
+  { key: 'client_name', label: 'Client Name (recent data only)' },
+  { key: 'client_category', label: 'Client Category (recent data only)' },
+  { key: 'order_type', label: 'Order Type (recent data only)' }
 ];
 
 const EXPORT_COLUMNS = ['awb_number', 'base_date', 'direction', 'pivot', 'aging_after_bag_received']
@@ -828,8 +838,11 @@ function aggregateLocalTrend(records, activeFilters) {
       const rowVal = String(r[dim] || '');
       if (rowVal !== String(val)) return;
     }
-    const key = r.base_date + '|' + r.pivot + '|' + r.aging_after_bag_received;
-    if (!grouped[key]) grouped[key] = { base_date: r.base_date, pivot: r.pivot, aging_after_bag_received: r.aging_after_bag_received, count: 0 };
+    // Keep location_name in the key so local-only mode produces the same row
+    // shape as the API's getTrend (needed by the Day -> location table).
+    const loc = String(r.location_name || '');
+    const key = r.base_date + '|' + r.pivot + '|' + r.aging_after_bag_received + '|' + loc;
+    if (!grouped[key]) grouped[key] = { base_date: r.base_date, pivot: r.pivot, aging_after_bag_received: r.aging_after_bag_received, location_name: loc, count: 0 };
     grouped[key].count += 1;
   });
   return Object.values(grouped);
@@ -1272,6 +1285,12 @@ function showChartError(box, msg) {
   box.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#a5231f;font-size:13px;text-align:center;padding:12px;">${escapeHtml(msg)}</div>`;
 }
 
+// Per-bucket table in the requested layout:
+//   columns = dates
+//   rows    = each ageing "Day N" total, immediately followed by the
+//             per-location breakdown that sums to it.
+// bucketTrendRows carry location_name, so both levels come from the same
+// aggregated trend summary (no raw AWB data needed).
 function renderTable(direction, bucket, bucketTrendRows, allDates) {
   const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
   const table = document.getElementById('table-' + safeId);
@@ -1280,44 +1299,64 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
   const ageBuckets = [];
   for (let d = lo; d <= hi; d++) ageBuckets.push(d);
 
-  // grid[date][ageDay] = AWB count
-  const grid = {};
-  allDates.forEach(d => { grid[d] = {}; ageBuckets.forEach(a => grid[d][a] = 0); });
+  // dayGrid[age][date] = total ; locGrid[age][loc][date] = count
+  const dayGrid = {}, locGrid = {};
+  ageBuckets.forEach(a => {
+    dayGrid[a] = {}; locGrid[a] = {};
+    allDates.forEach(d => dayGrid[a][d] = 0);
+  });
   let bucketTotal = 0;
   bucketTrendRows.forEach(r => {
     const a = Number(r.aging_after_bag_received);
-    if (grid[r.base_date] && grid[r.base_date][a] !== undefined) {
-      grid[r.base_date][a] += Number(r.count);
-      bucketTotal += Number(r.count);
-    }
+    if (!dayGrid[a] || dayGrid[a][r.base_date] === undefined) return;
+    const c = Number(r.count) || 0;
+    const loc = normVal(r.location_name) || '(blank)';
+    dayGrid[a][r.base_date] += c;
+    if (!locGrid[a][loc]) { locGrid[a][loc] = {}; allDates.forEach(d => locGrid[a][loc][d] = 0); }
+    locGrid[a][loc][r.base_date] += c;
+    bucketTotal += c;
   });
 
-  // Header: first column = Date, then one column per ageing day, then Total.
-  let thead = '<thead><tr><th class="sticky-col">Date</th>';
-  ageBuckets.forEach(a => thead += `<th>Day ${a}</th>`);
+  let thead = '<thead><tr><th class="sticky-col">Dates</th>';
+  allDates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
   thead += '<th>Total</th></tr></thead>';
 
-  // One row per date. Values = AWB counts for that date & ageing day.
-  const ageTotals = {}; ageBuckets.forEach(a => ageTotals[a] = 0);
+  const colTotals = {}; allDates.forEach(d => colTotals[d] = 0);
   let grandTotal = 0;
   let tbody = '<tbody>';
-  allDates.forEach(d => {
-    tbody += `<tr><td class="sticky-col" title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</td>`;
-    let rowTotal = 0;
-    ageBuckets.forEach(a => {
-      const v = grid[d][a];
-      ageTotals[a] += v;
-      rowTotal += v;
+  ageBuckets.forEach(a => {
+    const dayTotal = allDates.reduce((s2, d) => s2 + dayGrid[a][d], 0);
+    if (!dayTotal) return; // skip ageing days with no data at all
+    // Day row
+    tbody += `<tr class="day-row"><td class="sticky-col">Day ${a}</td>`;
+    allDates.forEach(d => {
+      const v = dayGrid[a][d];
+      colTotals[d] += v;
       tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
     });
-    grandTotal += rowTotal;
-    tbody += `<td><strong>${fmtInt(rowTotal)}</strong></td></tr>`;
+    grandTotal += dayTotal;
+    tbody += `<td><strong>${fmtInt(dayTotal)}</strong></td></tr>`;
+    // Per-location rows under this day, biggest first
+    const locs = Object.keys(locGrid[a]).sort((x, y) => {
+      const tx = allDates.reduce((s2, d) => s2 + locGrid[a][x][d], 0);
+      const ty = allDates.reduce((s2, d) => s2 + locGrid[a][y][d], 0);
+      return ty - tx;
+    });
+    locs.forEach(loc => {
+      const locTotal = allDates.reduce((s2, d) => s2 + locGrid[a][loc][d], 0);
+      if (!locTotal) return;
+      tbody += `<tr class="loc-row"><td class="sticky-col loc-cell">${escapeHtml(loc)}</td>`;
+      allDates.forEach(d => {
+        const v = locGrid[a][loc][d];
+        tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
+      });
+      tbody += `<td>${fmtInt(locTotal)}</td></tr>`;
+    });
   });
   tbody += '</tbody>';
 
-  // Footer: column totals across dates.
   let tfoot = '<tfoot><tr><td class="sticky-col">Grand Total</td>';
-  ageBuckets.forEach(a => { tfoot += `<td>${ageTotals[a] ? fmtInt(ageTotals[a]) : ''}</td>`; });
+  allDates.forEach(d => { tfoot += `<td>${fmtInt(colTotals[d])}</td>`; });
   tfoot += `<td>${fmtInt(grandTotal)}</td></tr></tfoot>`;
 
   table.innerHTML = thead + tbody + tfoot;
