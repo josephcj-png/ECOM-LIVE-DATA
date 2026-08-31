@@ -312,6 +312,10 @@ table.pivot-table tr.day-row td.sticky-col { background: #e4ece7; }
 table.pivot-table tr.loc-row td { color: var(--text-dim); }
 table.pivot-table tr.loc-row td.loc-cell { padding-left: 26px; font-style: normal; }
 table.pivot-table tr.loc-row:hover td { background: #f4f9f6; }
+table.pivot-table tr.day-row { cursor: pointer; }
+table.pivot-table tr.day-row:hover td { background: #e4efe8; }
+.day-caret { color: var(--green); font-size: 10px; display: inline-block; width: 10px; }
+.dc-hint { color: var(--text-dim); font-weight: 400; font-size: 11px; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -1285,12 +1289,16 @@ function showChartError(box, msg) {
   box.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#a5231f;font-size:13px;text-align:center;padding:12px;">${escapeHtml(msg)}</div>`;
 }
 
-// Per-bucket table in the requested layout:
+// Per-bucket table.
 //   columns = dates
-//   rows    = each ageing "Day N" total, immediately followed by the
-//             per-location breakdown that sums to it.
-// bucketTrendRows carry location_name, so both levels come from the same
-// aggregated trend summary (no raw AWB data needed).
+//   rows    = one "Day N" total row per ageing day.
+// The per-DC (location) breakdown under each day is COLLAPSED by default —
+// expanding every location under every ageing day made the page enormous.
+// Click a Day row to expand just that day's DCs.
+//
+// Exception: when BOTH a Region and an Ageing day are selected, the relevant
+// day's DC breakdown is auto-expanded, since that is exactly the "which DCs
+// in this region, at this ageing" question the filters are asking.
 function renderTable(direction, bucket, bucketTrendRows, allDates) {
   const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
   const table = document.getElementById('table-' + safeId);
@@ -1299,7 +1307,11 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
   const ageBuckets = [];
   for (let d = lo; d <= hi; d++) ageBuckets.push(d);
 
-  // dayGrid[age][date] = total ; locGrid[age][loc][date] = count
+  const f = state.filters[direction] || {};
+  const regionSel = f.region && f.region !== 'All';
+  const ageSel = f.aging_after_bag_received && f.aging_after_bag_received !== 'All';
+  const autoExpand = !!(regionSel && ageSel);
+
   const dayGrid = {}, locGrid = {};
   ageBuckets.forEach(a => {
     dayGrid[a] = {}; locGrid[a] = {};
@@ -1326,9 +1338,13 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
   let tbody = '<tbody>';
   ageBuckets.forEach(a => {
     const dayTotal = allDates.reduce((s2, d) => s2 + dayGrid[a][d], 0);
-    if (!dayTotal) return; // skip ageing days with no data at all
-    // Day row
-    tbody += `<tr class="day-row"><td class="sticky-col">Day ${a}</td>`;
+    if (!dayTotal) return;
+    const locCount = Object.keys(locGrid[a]).filter(l =>
+      allDates.reduce((s2, d) => s2 + locGrid[a][l][d], 0) > 0).length;
+    const expanded = autoExpand;
+    tbody += `<tr class="day-row" data-age="${a}" data-target="${safeId}">`;
+    tbody += `<td class="sticky-col"><span class="day-caret" id="caret-${safeId}-${a}">${expanded ? '▾' : '▸'}</span> Day ${a}`;
+    tbody += ` <span class="dc-hint">${locCount} DC${locCount === 1 ? '' : 's'}</span></td>`;
     allDates.forEach(d => {
       const v = dayGrid[a][d];
       colTotals[d] += v;
@@ -1336,7 +1352,7 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
     });
     grandTotal += dayTotal;
     tbody += `<td><strong>${fmtInt(dayTotal)}</strong></td></tr>`;
-    // Per-location rows under this day, biggest first
+
     const locs = Object.keys(locGrid[a]).sort((x, y) => {
       const tx = allDates.reduce((s2, d) => s2 + locGrid[a][x][d], 0);
       const ty = allDates.reduce((s2, d) => s2 + locGrid[a][y][d], 0);
@@ -1345,7 +1361,8 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
     locs.forEach(loc => {
       const locTotal = allDates.reduce((s2, d) => s2 + locGrid[a][loc][d], 0);
       if (!locTotal) return;
-      tbody += `<tr class="loc-row"><td class="sticky-col loc-cell">${escapeHtml(loc)}</td>`;
+      tbody += `<tr class="loc-row loc-of-${safeId}-${a}"${expanded ? '' : ' style="display:none;"'}>`;
+      tbody += `<td class="sticky-col loc-cell">${escapeHtml(loc)}</td>`;
       allDates.forEach(d => {
         const v = locGrid[a][loc][d];
         tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
@@ -1360,6 +1377,21 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
   tfoot += `<td>${fmtInt(grandTotal)}</td></tr></tfoot>`;
 
   table.innerHTML = thead + tbody + tfoot;
+
+  // Click a Day row to toggle just that day's DC rows.
+  table.querySelectorAll('tr.day-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const a = tr.getAttribute('data-age');
+      const tgt = tr.getAttribute('data-target');
+      const caret = document.getElementById('caret-' + tgt + '-' + a);
+      const rows = table.querySelectorAll('.loc-of-' + tgt + '-' + a);
+      if (!rows.length) return;
+      const nowHidden = rows[0].style.display === 'none';
+      rows.forEach(r => { r.style.display = nowHidden ? '' : 'none'; });
+      if (caret) caret.textContent = nowHidden ? '▾' : '▸';
+    });
+  });
+
   const countEl = document.getElementById('count-' + safeId);
   if (countEl) countEl.textContent = fmtInt(bucketTotal);
 }
