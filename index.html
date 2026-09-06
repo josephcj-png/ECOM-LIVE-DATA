@@ -546,7 +546,7 @@ const CATEGORY_FILTER = 'IN BAG / BRSNR';
 
 // Dimensions aggregated into the permanent trend summary server-side.
 // Must mirror Code.gs TREND_FILTER_DIMENSIONS exactly (used for local-mode
-// aggregation AND for the trend-summary the client POSTs). location_name MUST
+// aggregation AND for the trend-summary the client POSTs). dc_liability MUST
 // be included here or it is dropped from every trend row (shows as "(blank)").
 // ONLY LOW-CARDINALITY dimensions belong here. The trend sheet stores one row
 // per unique combination of (base_date, pivot, ageing, ...these dims), so any
@@ -987,7 +987,7 @@ function aggregateLocalTrend(records, activeFilters) {
       const rowVal = String(r[dim] || '');
       if (rowVal !== String(val)) return;
     }
-    // Keep location_name in the key so local-only mode produces the same row
+    // Keep dc_liability in the key so local-only mode produces the same row
     // shape as the API's getTrend (needed by the Day -> location table).
     const loc = String(r.dc_liability || '');
     const key = r.base_date + '|' + r.pivot + '|' + r.aging_after_bag_received + '|' + loc;
@@ -1763,7 +1763,7 @@ async function renderDashboard(direction) {
 
 // Region mode: draws one line per location mapped to the selected region for
 // this bucket, plus a dotted line for the region-wide average across
-// locations. Uses the drill-down endpoint (group by location_name).
+// DCs. Uses the drill-down endpoint (group by dc_liability).
 async function renderRegionChart(direction, bucket, allDates) {
   const filters = Object.assign({}, activeFilterParams(direction), { pivot: bucket });
   let data;
@@ -2213,25 +2213,25 @@ async function downloadRawNumbers() {
 
     const rows = [];
     PIVOTS[direction].forEach(p => {
-      const row = { level: 'Pivot', pivot: p, location_name: '' };
+      const row = { level: 'Pivot', pivot: p, dc_liability: '' };
       allDates.forEach(d => { row[fmtDisplayDate(d)] = pivotGrid[p][d]; });
       row.Total = allDates.reduce((s, d) => s + pivotGrid[p][d], 0);
       rows.push(row);
     });
 
-    // Level 2: pivot × location × date (from drill-down)
+    // Level 2: pivot x DC-liability x date (from drill-down)
     for (const p of PIVOTS[direction]) {
       const filters = Object.assign({}, activeFilterParams(direction), { pivot: p });
       const dd = await fetchDrilldown(direction, 'dc_liability', filters);
       dd.groups.forEach(g => {
-        const row = { level: 'Location', pivot: p, location_name: g.value };
+        const row = { level: 'DC Liability', pivot: p, dc_liability: g.value };
         allDates.forEach(d => { const rr = g.rows.find(x => x.base_date === d); row[fmtDisplayDate(d)] = rr ? rr.count : 0; });
         row.Total = g.total;
         rows.push(row);
       });
     }
 
-    const cols = ['level', 'pivot', 'location_name'].concat(allDates.map(fmtDisplayDate)).concat(['Total']);
+    const cols = ['level', 'pivot', 'dc_liability'].concat(allDates.map(fmtDisplayDate)).concat(['Total']);
     const csv = Papa.unparse(rows, { columns: cols });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const urlObj = URL.createObjectURL(blob);
