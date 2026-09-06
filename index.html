@@ -660,40 +660,49 @@ function lhMissingColumns(fields) {
 // sheet and picks the row that best matches the expected column names, then
 // re-reads the sheet using that row as the header.
 // Returns { rows, fields, headerRowIndex }.
-function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows) {
-  maxScanRows = maxScanRows || 15;
+function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows, requiredNames) {
+  maxScanRows = maxScanRows || 50;
   const norm = n => String(n || '').toLowerCase().replace(/[\s_\-]+/g, '');
   const wanted = (expectedNames || []).map(norm);
+  const required = (requiredNames || []).map(norm);
 
   const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: true });
-  let bestRow = -1, bestScore = 0;
+
+  // Score every candidate row. A header row is the one containing the most of
+  // the REQUIRED column names (that is what actually matters), then the most
+  // expected names, then the most non-empty cells. Scoring on required names
+  // first stops a sparse stray row — e.g. one holding a single value like
+  // "MM" — from being mistaken for the header on a wide sheet.
+  let best = null;
   const limit = Math.min(maxScanRows, grid.length);
   for (let r = 0; r < limit; r++) {
-    const cells = (grid[r] || []).map(norm).filter(Boolean);
-    if (cells.length < 2) continue;              // a header needs several cells
-    if (r >= grid.length - 1) continue;          // must have data rows beneath it
-    let score = 0;
-    wanted.forEach(w => { if (cells.indexOf(w) !== -1) score++; });
-    if (score > bestScore) { bestScore = score; bestRow = r; }
-  }
-  // Fall back to the first row that looks like a header (>=2 non-empty cells)
-  // and still has rows beneath it.
-  if (bestRow < 0) {
-    for (let r = 0; r < limit; r++) {
-      const cells = (grid[r] || []).filter(c => String(c || '').trim() !== '');
-      if (cells.length >= 2 && r < grid.length - 1) { bestRow = r; break; }
+    const cells = (grid[r] || []).map(norm);
+    const nonEmpty = cells.filter(Boolean);
+    if (nonEmpty.length < 2) continue;
+    if (r >= grid.length - 1) continue; // needs data rows beneath it
+    let reqHits = 0, expHits = 0;
+    required.forEach(w => { if (cells.indexOf(w) !== -1) reqHits++; });
+    wanted.forEach(w => { if (cells.indexOf(w) !== -1) expHits++; });
+    const cand = { row: r, reqHits: reqHits, expHits: expHits, width: nonEmpty.length };
+    if (!best ||
+        cand.reqHits > best.reqHits ||
+        (cand.reqHits === best.reqHits && cand.expHits > best.expHits) ||
+        (cand.reqHits === best.reqHits && cand.expHits === best.expHits && cand.width > best.width)) {
+      best = cand;
     }
   }
-  if (bestRow < 0) bestRow = 0;
 
+  let bestRow = best ? best.row : 0;
   let rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, range: bestRow });
-  // Last-resort: if slicing produced nothing, read the sheet as-is.
   if (!rows.length && bestRow !== 0) {
     bestRow = 0;
     rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
   }
   const fields = rows.length ? Object.keys(rows[0]) : (grid[bestRow] || []).map(String);
-  return { rows: rows, fields: fields, headerRowIndex: bestRow, gridRows: grid.length };
+  // A compact preview of the sheet's first rows, for diagnostics when nothing matches.
+  const preview = grid.slice(0, 5).map(r => (r || []).slice(0, 14).map(c => String(c || '')).join(' | '));
+  return { rows: rows, fields: fields, headerRowIndex: bestRow, gridRows: grid.length,
+           reqHits: best ? best.reqHits : 0, preview: preview };
 }
 
 function sheetRowCount(ws) {
@@ -735,9 +744,9 @@ function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
   for (let i = 0; i < order.length; i++) {
     const name = order[i];
     const ws = wb.Sheets[name];
-    if (!ws || !ws['!ref']) { report.push('"' + name + '": empty'); continue; }
+    if (!ws || !ws['!ref']) { report.push('"' + name + '": no cells'); continue; }
     let det;
-    try { det = readSheetWithHeaderDetection(ws, expectedNames); }
+    try { det = readSheetWithHeaderDetection(ws, expectedNames, 50, requiredNames); }
     catch (e) { report.push('"' + name + '": unreadable'); continue; }
     if (!det.rows.length) { report.push('"' + name + '": header row ' + (det.headerRowIndex + 1) + ', no data rows'); continue; }
     const hmap = lhHeaderMap(det.fields);
@@ -751,7 +760,23 @@ function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
     return { ok: true, sheetName: name, rows: det.rows, fields: det.fields,
              headerRowIndex: det.headerRowIndex, report: report };
   }
-  return { ok: false, report: report.length ? report : ['workbook has no readable sheets'] };
+  // Nothing matched — include a preview of the widest sheet so the real
+  // structure is visible without having to guess.
+  let previewText = '';
+  try {
+    let widest = null;
+    order.forEach(n => {
+      const ws2 = wb.Sheets[n];
+      if (!ws2 || !ws2['!ref']) return;
+      const d = readSheetWithHeaderDetection(ws2, expectedNames, 50, requiredNames);
+      if (!widest || d.gridRows > widest.gridRows) widest = { name: n, det: d };
+    });
+    if (widest) {
+      previewText = ' First rows of "' + widest.name + '": ' +
+        widest.det.preview.map((p, i) => '[row ' + (i + 1) + '] ' + p).join('  ');
+    }
+  } catch (e) {}
+  return { ok: false, report: (report.length ? report : ['workbook has no readable sheets']), preview: previewText };
 }
 
 function computeLhFlow(row) {
@@ -2294,7 +2319,7 @@ function startLhUpload(file, baseDate) {
         const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
         const res = readWorkbookPreferringBase(wb, LH_COLUMNS, LH_REQUIRED_COLUMNS);
         if (!res.ok) {
-          onErr('Could not find usable in-transit data. Tried each tab: ' + res.report.join(' | '));
+          onErr('Could not find usable in-transit data. Tried each tab: ' + res.report.join(' | ') + (res.preview || ''));
           return;
         }
         const rows = res.rows;
