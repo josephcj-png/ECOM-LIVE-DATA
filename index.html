@@ -1028,7 +1028,18 @@ function computeFloorAgeing(pivot, baseDate, row) {
   return calendarDayDiff(baseDate, src);
 }
 
-function processRow(direction, baseDate, row) {
+function processRow(direction, baseDate, row, hmap) {
+  // Read every source column through the tolerant header map so differences in
+  // case/spacing between exports do not silently blank out fields. Build a
+  // plain remapped object (cheap, and avoids a per-row Proxy on 200k+ rows).
+  if (hmap) {
+    const src = row;
+    row = {};
+    REQUIRED_RAW_COLUMNS.concat(RAW_COLUMNS_CORE, RAW_COLUMNS_EXTRA).forEach(c => {
+      const actual = hmap[csvNormKey(c)];
+      row[c] = actual === undefined ? src[c] : src[actual];
+    });
+  }
   const pivotVal = computePivot(direction, row);
   if (!pivotVal) return null;
   const ageing = computeFloorAgeing(pivotVal, baseDate, row);
@@ -1048,9 +1059,70 @@ function processRow(direction, baseDate, row) {
   return rec;
 }
 
+// ---------------------------------------------------------------------------
+// CSV header-row detection
+// CSV exports can carry a title / blank / metadata line above the real header,
+// exactly like the xlsx ones. PapaParse would treat that first line as the
+// header, so strip anything above the true header before parsing.
+// Used via PapaParse's beforeFirstChunk hook.
+// ---------------------------------------------------------------------------
+function csvNormKey(k) {
+  return String(k || '').toLowerCase().replace(/^\uFEFF/, '').replace(/^"|"$/g, '').replace(/[\s_\-]+/g, '');
+}
+// Splits one CSV line into fields, respecting simple quoting.
+function csvSplitLine(line) {
+  const out = []; let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { if (inQ && line[i + 1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
+    else if (ch === ',' && !inQ) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+// Returns the chunk with any pre-header lines removed.
+function stripCsvPreamble(chunk, requiredNames, expectedNames) {
+  const required = (requiredNames || []).map(csvNormKey);
+  const expected = (expectedNames || []).map(csvNormKey);
+  const lines = String(chunk || '').split(/\r\n|\n|\r/);
+  const scan = Math.min(50, lines.length);
+  let best = null;
+  for (let i = 0; i < scan; i++) {
+    if (!lines[i] || !lines[i].trim()) continue;
+    const cells = csvSplitLine(lines[i]).map(csvNormKey);
+    const nonEmpty = cells.filter(Boolean);
+    if (nonEmpty.length < 2) continue;
+    let reqHits = 0, expHits = 0;
+    required.forEach(w => { if (cells.indexOf(w) !== -1) reqHits++; });
+    expected.forEach(w => { if (cells.indexOf(w) !== -1) expHits++; });
+    const cand = { i: i, reqHits: reqHits, expHits: expHits, width: nonEmpty.length };
+    if (!best ||
+        cand.reqHits > best.reqHits ||
+        (cand.reqHits === best.reqHits && cand.expHits > best.expHits) ||
+        (cand.reqHits === best.reqHits && cand.expHits === best.expHits && cand.width > best.width)) {
+      best = cand;
+    }
+  }
+  if (!best || best.i === 0 || best.reqHits === 0) return chunk; // already correct, or nothing matched
+  return lines.slice(best.i).join('\n');
+}
+
+// Tolerant of case and of space/underscore/hyphen differences, so
+// "Manifest Received Time IST" matches "manifest_received_time_ist".
 function validateColumns(fields) {
-  const have = new Set((fields || []).map(f => (f || '').trim()));
-  return REQUIRED_RAW_COLUMNS.filter(c => !have.has(c));
+  const have = new Set((fields || []).map(csvNormKey));
+  return REQUIRED_RAW_COLUMNS.filter(c => !have.has(csvNormKey(c)));
+}
+// Maps logical floor column -> the actual header used in this file.
+function floorHeaderMap(fields) {
+  const map = {};
+  (fields || []).forEach(f => { if (f) map[csvNormKey(f)] = f; });
+  return map;
+}
+function floorGet(row, hmap, logicalName) {
+  const actual = hmap ? hmap[csvNormKey(logicalName)] : undefined;
+  return actual === undefined ? row[logicalName] : row[actual];
 }
 
 function uniqueSorted(arr, field) {
@@ -1342,19 +1414,22 @@ function parseCSVFile(direction, baseDate, file, callbacks) {
   let missingCols = null;
   let checkedHeader = false;
 
+  let floorMap = null;
   Papa.parse(file, {
     header: true,
     skipEmptyLines: true,
     worker: false,
     chunkSize: 1024 * 1024 * 4,
+    beforeFirstChunk: chunk => stripCsvPreamble(chunk, REQUIRED_RAW_COLUMNS, RAW_COLUMNS_CORE),
     step: function (results, parser) {
       if (!checkedHeader) {
         checkedHeader = true;
+        floorMap = floorHeaderMap(results.meta.fields);
         missingCols = validateColumns(results.meta.fields);
         if (missingCols.length) { parser.abort(); return; }
       }
       rowCount++;
-      const rec = processRow(direction, baseDate, results.data);
+      const rec = processRow(direction, baseDate, results.data, floorMap);
       if (rec) buffer.push(rec);
       if (rowCount % 25000 === 0 && callbacks.onProgress) callbacks.onProgress(rowCount);
     },
@@ -1380,6 +1455,7 @@ function parseExcelFile(direction, baseDate, file, callbacks) {
       const det = readSheetWithHeaderDetection(ws, REQUIRED_RAW_COLUMNS);
       const rows = det.rows;
       if (!rows.length) { callbacks.onError('No rows found in file.'); return; }
+      const floorMapX = floorHeaderMap(det.fields);
       const missingCols = validateColumns(det.fields);
       if (missingCols.length) {
         callbacks.onError(`Missing required columns: ${missingCols.join(', ')}. Columns found: ${det.fields.join(', ')}`);
@@ -1390,7 +1466,7 @@ function parseExcelFile(direction, baseDate, file, callbacks) {
       function processChunk() {
         const end = Math.min(i + 5000, rows.length);
         for (; i < end; i++) {
-          const rec = processRow(direction, baseDate, rows[i]);
+          const rec = processRow(direction, baseDate, rows[i], floorMapX);
           if (rec) buffer.push(rec);
         }
         if (callbacks.onProgress) callbacks.onProgress(i);
@@ -2294,6 +2370,7 @@ function startLhUpload(file, baseDate) {
     let buffer = [], rowCount = 0, checked = false, missing = null, lhMap = null;
     Papa.parse(file, {
       header: true, skipEmptyLines: true, chunkSize: 1024 * 1024 * 4,
+      beforeFirstChunk: chunk => stripCsvPreamble(chunk, LH_REQUIRED_COLUMNS, LH_COLUMNS),
       step: (res, parser) => {
         if (!checked) {
           checked = true;
