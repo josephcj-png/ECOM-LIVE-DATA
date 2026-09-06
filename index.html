@@ -370,8 +370,8 @@ table.pivot-table tr.day-row:hover td { background: #e4efe8; }
       <select id="filter-aging-Forward"></select>
     </div>
     <div class="filter-item">
-      <label>Location Name</label>
-      <select id="filter-location-Forward"></select>
+      <label>DC Liability</label>
+      <select id="filter-dc-Forward"></select>
     </div>
     <button class="btn" id="more-filters-btn-Forward" type="button">Select More Filters ▸</button>
     <button class="btn" id="clear-filters-Forward" type="button">Clear Filters</button>
@@ -406,8 +406,8 @@ table.pivot-table tr.day-row:hover td { background: #e4efe8; }
       <select id="filter-aging-Reverse"></select>
     </div>
     <div class="filter-item">
-      <label>Location Name</label>
-      <select id="filter-location-Reverse"></select>
+      <label>DC Liability</label>
+      <select id="filter-dc-Reverse"></select>
     </div>
     <button class="btn" id="more-filters-btn-Reverse" type="button">Select More Filters ▸</button>
     <button class="btn" id="clear-filters-Reverse" type="button">Clear Filters</button>
@@ -585,6 +585,7 @@ const LH_TREND_DIMENSIONS = [
   'lh_flow', 'MM_origin', 'MM_destination', 'Zone', 'movement_type',
   'MM_origin_type', 'MM_destination_type', 'MM_Status', 'Volumetric_flag', 'client_tag'
 ];
+// Same rule for LH: only the dimensions stored in LH_TREND_DIMENSIONS.
 const LH_DRAWER_FIELDS = [
   { key: 'Zone', label: 'Zone' },
   { key: 'movement_type', label: 'Movement Type' },
@@ -592,11 +593,7 @@ const LH_DRAWER_FIELDS = [
   { key: 'MM_destination_type', label: 'MM Destination Type' },
   { key: 'MM_Status', label: 'MM Status' },
   { key: 'Volumetric_flag', label: 'Volumetric Flag' },
-  { key: 'client_tag', label: 'Client Tag' },
-  { key: 'Client', label: 'Client (recent only)' },
-  { key: 'Manifest_origin', label: 'Manifest Origin (recent only)' },
-  { key: 'Manifest_Destination', label: 'Manifest Destination (recent only)' },
-  { key: 'Lane Code', label: 'Lane Code (recent only)' }
+  { key: 'client_tag', label: 'Client Tag' }
 ];
 
 // The four LH tables.
@@ -608,6 +605,29 @@ const LH_TABLES = [
 ];
 
 // Normalises the `flag` column into Forward / Reverse.
+// LH base files come from different reports and the header spelling varies
+// (e.g. "MM Origin" / "mm_origin" / "MM_Origin"). Match headers leniently:
+// lowercase, and ignore spaces / underscores / hyphens entirely.
+function lhNormKey(k) {
+  return String(k || '').toLowerCase().replace(/[\s_\-]+/g, '');
+}
+// Builds { normalisedHeader -> actualHeader } for a parsed row's fields.
+function lhHeaderMap(fields) {
+  const map = {};
+  (fields || []).forEach(f => { if (f) map[lhNormKey(f)] = f; });
+  return map;
+}
+// Reads a logical LH column out of a row using the tolerant header map.
+function lhGet(row, hmap, logicalName) {
+  const actual = hmap[lhNormKey(logicalName)];
+  return actual === undefined ? '' : row[actual];
+}
+// Which of the required LH columns are genuinely absent.
+function lhMissingColumns(fields) {
+  const hmap = lhHeaderMap(fields);
+  return LH_REQUIRED_COLUMNS.filter(c => hmap[lhNormKey(c)] === undefined);
+}
+
 function computeLhFlow(row) {
   const f = normVal(row.flag).toLowerCase();
   if (!f) return '';
@@ -616,17 +636,18 @@ function computeLhFlow(row) {
   return '';
 }
 
-function processLhRow(baseDate, row) {
-  const flow = computeLhFlow(row);
+function processLhRow(baseDate, row, hmap) {
+  hmap = hmap || lhHeaderMap(Object.keys(row || {}));
+  const flow = computeLhFlow({ flag: lhGet(row, hmap, 'flag') });
   if (!flow) return null;
-  const ageRaw = normVal(row.intransit_ageing);
+  const ageRaw = normVal(lhGet(row, hmap, 'intransit_ageing'));
   if (ageRaw === '') return null;
   const ageing = Math.round(Number(ageRaw));
   if (!isFinite(ageing)) return null;
   if (ageing < LH_AGE_RANGE[0] || ageing > LH_AGE_RANGE[1]) return null;
 
   const rec = {};
-  LH_COLUMNS.forEach(c => { rec[c] = normVal(row[c]); });
+  LH_COLUMNS.forEach(c => { rec[c] = normVal(lhGet(row, hmap, c)); });
   rec.lh_flow = flow;
   rec.intransit_ageing = ageing;
   rec.base_date = baseDate;
@@ -649,29 +670,19 @@ function aggregateLhTrend(records) {
   return Object.values(grouped);
 }
 
-const RAW_ONLY_FILTERS = ['manifest_code', 'shipment_type', 'item_status_text', 'doh_flag',
-  'seal_number', 'manifest_status_text', 'manifest_origin_name', 'manifest_origin_type',
-  'manifest_destination_name', 'manifest_destination_type', 'client_name', 'client_category', 'order_type'];
+// No raw AWB rows are stored any more, so there are no raw-only filters.
+const RAW_ONLY_FILTERS = [];
 
 // Fields shown in the "Select more filters" drawer (order matters).
+// Only dimensions that are actually STORED in the trend summary can be
+// filtered on, so the drawer lists exactly those and nothing else. Anything
+// we no longer record was removed — previously they appeared but could never
+// return results.
 const DRAWER_FIELDS = [
   { key: 'region', label: 'Region' },
-  { key: 'volumetric_flag', label: 'Volumetric Flag' },
-  { key: 'manifest_code', label: 'Manifest Code (recent data only)' },
-  { key: 'shipment_type', label: 'Shipment Type (recent data only)' },
-  { key: 'item_status_text', label: 'Item Status (recent data only)' },
   { key: 'bin_level', label: 'Bin Level' },
   { key: 'rejection_category', label: 'Rejection Category' },
-  { key: 'doh_flag', label: 'DOH Flag (recent data only)' },
-  { key: 'seal_number', label: 'Seal Number (recent data only)' },
-  { key: 'manifest_status_text', label: 'Manifest Status (recent data only)' },
-  { key: 'manifest_origin_name', label: 'Manifest Origin (recent data only)' },
-  { key: 'manifest_origin_type', label: 'Origin Type (recent data only)' },
-  { key: 'manifest_destination_name', label: 'Manifest Destination (recent data only)' },
-  { key: 'manifest_destination_type', label: 'Destination Type (recent data only)' },
-  { key: 'client_name', label: 'Client Name (recent data only)' },
-  { key: 'client_category', label: 'Client Category (recent data only)' },
-  { key: 'order_type', label: 'Order Type (recent data only)' }
+  { key: 'volumetric_flag', label: 'Volumetric Flag' }
 ];
 
 const EXPORT_COLUMNS = ['awb_number', 'base_date', 'direction', 'pivot', 'aging_after_bag_received']
@@ -2079,23 +2090,23 @@ function startLhUpload(file, baseDate) {
   const onErr = m => setStatus('LH', `Error processing "${file.name}": ${m}`, 'error');
 
   if (lower.endsWith('.csv')) {
-    let buffer = [], rowCount = 0, checked = false, missing = null;
+    let buffer = [], rowCount = 0, checked = false, missing = null, lhMap = null;
     Papa.parse(file, {
       header: true, skipEmptyLines: true, chunkSize: 1024 * 1024 * 4,
       step: (res, parser) => {
         if (!checked) {
           checked = true;
-          const have = new Set((res.meta.fields || []).map(f => (f || '').trim()));
-          missing = LH_REQUIRED_COLUMNS.filter(c => !have.has(c));
+          lhMap = lhHeaderMap(res.meta.fields);
+          missing = lhMissingColumns(res.meta.fields);
           if (missing.length) { parser.abort(); return; }
         }
         rowCount++;
-        const rec = processLhRow(baseDate, res.data);
+        const rec = processLhRow(baseDate, res.data, lhMap);
         if (rec) buffer.push(rec);
         if (rowCount % 25000 === 0) setStatus('LH', `Processing… ${fmtInt(rowCount)} rows`, 'info');
       },
       complete: () => {
-        if (missing && missing.length) { onErr('Missing required columns: ' + missing.join(', ')); return; }
+        if (missing && missing.length) { onErr('Missing required columns: ' + missing.join(', ') + '. Columns found: ' + Object.values(lhMap || {}).join(', ')); return; }
         onDone(buffer, rowCount);
       },
       error: err => onErr(err.message || String(err))
@@ -2107,11 +2118,16 @@ function startLhUpload(file, baseDate) {
         const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
         const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
         if (!rows.length) { onErr('No rows found.'); return; }
-        const have = new Set(Object.keys(rows[0]));
-        const missing = LH_REQUIRED_COLUMNS.filter(c => !have.has(c));
-        if (missing.length) { onErr('Missing required columns: ' + missing.join(', ')); return; }
+        const fields = Object.keys(rows[0]);
+        const missing = lhMissingColumns(fields);
+        if (missing.length) {
+          onErr('Missing required columns: ' + missing.join(', ') +
+                '. Columns found in the file: ' + fields.join(', '));
+          return;
+        }
+        const hmap = lhHeaderMap(fields);
         const buffer = [];
-        rows.forEach(r => { const rec = processLhRow(baseDate, r); if (rec) buffer.push(rec); });
+        rows.forEach(r => { const rec = processLhRow(baseDate, r, hmap); if (rec) buffer.push(rec); });
         onDone(buffer, rows.length);
       } catch (err) { onErr(err.message || String(err)); }
     };
