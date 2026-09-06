@@ -431,6 +431,7 @@ table.pivot-table tr.day-row:hover td { background: #e4efe8; }
 <section class="tab-panel" id="panel-LH">
   <div class="status-banner" id="status-LH"></div>
   <div class="filter-bar">
+    <div class="filter-item"><label>DC Liability</label><select id="filter-lh-dc_liability"></select></div>
     <div class="filter-item"><label>MM Origin</label><select id="filter-lh-MM_origin"></select></div>
     <div class="filter-item"><label>MM Destination</label><select id="filter-lh-MM_destination"></select></div>
     <div class="filter-item"><label>In-Transit Ageing</label><select id="filter-lh-intransit_ageing"></select></div>
@@ -582,7 +583,8 @@ const LH_AGE_RANGE = [1, 30];
 
 // Dimensions stored in the LH trend summary (counts only, same as floor).
 const LH_TREND_DIMENSIONS = [
-  'lh_flow', 'MM_origin', 'MM_destination', 'Zone', 'movement_type',
+  'lh_flow', 'lh_category', 'dc_liability',
+  'MM_origin', 'MM_destination', 'Zone', 'movement_type',
   'MM_origin_type', 'MM_destination_type', 'MM_Status', 'Volumetric_flag', 'client_tag'
 ];
 // Same rule for LH: only the dimensions stored in LH_TREND_DIMENSIONS.
@@ -597,11 +599,21 @@ const LH_DRAWER_FIELDS = [
 ];
 
 // The four LH tables.
+// LH pendency categories (from the LH logic sheet):
+//   "DC as MM origin"      -> rows where MM_origin_type = MM;      DC liability = MM_origin
+//   "DC as MM Destination" -> rows where MM_destination_type = MM; DC liability = MM_destination
+// A single row can qualify on both sides, in which case it is counted once
+// under each category (with the corresponding DC as the liable party).
+const LH_CAT_ORIGIN = 'DC as MM origin';
+const LH_CAT_DEST = 'DC as MM Destination';
+
+// The four tables: Forward/Reverse x the two categories. All are keyed on
+// dc_liability, which already resolves to MM_origin or MM_destination.
 const LH_TABLES = [
-  { key: 'FWD_origin', flow: 'Forward', groupBy: 'MM_origin', title: 'Forward — by MM Origin' },
-  { key: 'FWD_dest', flow: 'Forward', groupBy: 'MM_destination', title: 'Forward — by MM Destination' },
-  { key: 'REV_origin', flow: 'Reverse', groupBy: 'MM_origin', title: 'Reverse — by MM Origin' },
-  { key: 'REV_dest', flow: 'Reverse', groupBy: 'MM_destination', title: 'Reverse — by MM Destination' }
+  { key: 'FWD_origin', flow: 'Forward', category: LH_CAT_ORIGIN, title: 'Forward — DC as MM Origin' },
+  { key: 'FWD_dest',   flow: 'Forward', category: LH_CAT_DEST,   title: 'Forward — DC as MM Destination' },
+  { key: 'REV_origin', flow: 'Reverse', category: LH_CAT_ORIGIN, title: 'Reverse — DC as MM Origin' },
+  { key: 'REV_dest',   flow: 'Reverse', category: LH_CAT_DEST,   title: 'Reverse — DC as MM Destination' }
 ];
 
 // Normalises the `flag` column into Forward / Reverse.
@@ -736,23 +748,41 @@ function computeLhFlow(row) {
   return '';
 }
 
+// Is this MM type value the "MM" marker the logic sheet refers to?
+function isMmType(v) {
+  return normVal(v).toUpperCase() === 'MM';
+}
+
+// Returns an ARRAY of records — one per LH category the row qualifies for.
+// A row where both MM_origin_type and MM_destination_type are "MM" produces
+// two records (one liable to the origin DC, one to the destination DC), which
+// is what lets the same shipment appear in both the origin and destination
+// tables without double-counting within a single table.
 function processLhRow(baseDate, row, hmap) {
   hmap = hmap || lhHeaderMap(Object.keys(row || {}));
   const flow = computeLhFlow({ flag: lhGet(row, hmap, 'flag') });
-  if (!flow) return null;
+  if (!flow) return [];
   const ageRaw = normVal(lhGet(row, hmap, 'intransit_ageing'));
-  if (ageRaw === '') return null;
+  if (ageRaw === '') return [];
   const ageing = Math.round(Number(ageRaw));
-  if (!isFinite(ageing)) return null;
-  if (ageing < LH_AGE_RANGE[0] || ageing > LH_AGE_RANGE[1]) return null;
+  if (!isFinite(ageing)) return [];
+  if (ageing < LH_AGE_RANGE[0] || ageing > LH_AGE_RANGE[1]) return [];
 
-  const rec = {};
-  LH_COLUMNS.forEach(c => { rec[c] = normVal(lhGet(row, hmap, c)); });
-  rec.lh_flow = flow;
-  rec.intransit_ageing = ageing;
-  rec.base_date = baseDate;
-  rec.direction = 'LH';
-  return rec;
+  const base = {};
+  LH_COLUMNS.forEach(c => { base[c] = normVal(lhGet(row, hmap, c)); });
+  base.lh_flow = flow;
+  base.intransit_ageing = ageing;
+  base.base_date = baseDate;
+  base.direction = 'LH';
+
+  const out = [];
+  if (isMmType(base.MM_origin_type) && base.MM_origin) {
+    out.push(Object.assign({}, base, { lh_category: LH_CAT_ORIGIN, dc_liability: base.MM_origin }));
+  }
+  if (isMmType(base.MM_destination_type) && base.MM_destination) {
+    out.push(Object.assign({}, base, { lh_category: LH_CAT_DEST, dc_liability: base.MM_destination }));
+  }
+  return out;
 }
 
 function aggregateLhTrend(records) {
@@ -811,7 +841,7 @@ const state = {
   filters: {
     Forward: { pivot: 'All', aging_after_bag_received: 'All', dc_liability: 'All', awb_search: '' },
     Reverse: { pivot: 'All', aging_after_bag_received: 'All', dc_liability: 'All', awb_search: '' },
-    LH: { MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' }
+    LH: { dc_liability: 'All', MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' }
   },
   drawerOpen: { Forward: false, Reverse: false, LH: false },
   // Drill-down navigation stack per direction. Each entry:
@@ -2230,8 +2260,8 @@ function startLhUpload(file, baseDate) {
           if (missing.length) { parser.abort(); return; }
         }
         rowCount++;
-        const rec = processLhRow(baseDate, res.data, lhMap);
-        if (rec) buffer.push(rec);
+        const recs = processLhRow(baseDate, res.data, lhMap);
+        for (let ri = 0; ri < recs.length; ri++) buffer.push(recs[ri]);
         if (rowCount % 25000 === 0) setStatus('LH', `Processing… ${fmtInt(rowCount)} rows`, 'info');
       },
       complete: () => {
@@ -2254,7 +2284,7 @@ function startLhUpload(file, baseDate) {
         const fields = res.fields;
         const hmap = lhHeaderMap(fields);
         const buffer = [];
-        rows.forEach(r => { const rec = processLhRow(baseDate, r, hmap); if (rec) buffer.push(rec); });
+        rows.forEach(r => { processLhRow(baseDate, r, hmap).forEach(rec => buffer.push(rec)); });
         onDone(buffer, rows.length);
       } catch (err) { onErr(err.message || String(err)); }
     };
@@ -2426,7 +2456,7 @@ function initTabs() {
 function lhActiveFilters() {
   const f = state.filters.LH || {};
   const out = {};
-  ['MM_origin', 'MM_destination', 'intransit_ageing'].forEach(k => {
+  ['dc_liability', 'MM_origin', 'MM_destination', 'intransit_ageing'].forEach(k => {
     if (f[k] && f[k] !== 'All') out[k] = f[k];
   });
   LH_DRAWER_FIELDS.forEach(df => { if (f[df.key] && f[df.key] !== 'All') out[df.key] = f[df.key]; });
@@ -2484,10 +2514,10 @@ async function renderLhDashboard() {
     </div>`).join('');
 
   LH_TABLES.forEach(t => {
-    const sub = rows.filter(r => String(r.lh_flow) === t.flow);
+    const sub = rows.filter(r => String(r.lh_flow) === t.flow && String(r.lh_category) === t.category);
     const grid = {}; let tot = 0;
     sub.forEach(r => {
-      const g = normVal(r[t.groupBy]) || '(blank)';
+      const g = normVal(r.dc_liability) || '(blank)';
       if (!grid[g]) { grid[g] = {}; allDates.forEach(d => grid[g][d] = 0); }
       grid[g][r.base_date] += Number(r.count) || 0;
       tot += Number(r.count) || 0;
@@ -2495,7 +2525,7 @@ async function renderLhDashboard() {
     const keys = Object.keys(grid).sort((a, b) =>
       allDates.reduce((s2, d) => s2 + grid[b][d], 0) - allDates.reduce((s2, d) => s2 + grid[a][d], 0));
 
-    let thead = `<thead><tr><th class="sticky-col">${escapeHtml(t.groupBy.replace('_', ' '))}</th>`;
+    let thead = `<thead><tr><th class="sticky-col">DC Liability</th>`;
     allDates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
     thead += '<th>Total</th></tr></thead>';
 
@@ -2525,7 +2555,7 @@ async function renderLhDashboard() {
 function refreshLhFilterUI() {
   const src = state.localRaw.LH.length ? state.localRaw.LH : state.trends.LH;
   const opts = {};
-  ['MM_origin', 'MM_destination'].concat(LH_DRAWER_FIELDS.map(f => f.key)).forEach(k => {
+  ['dc_liability', 'MM_origin', 'MM_destination'].concat(LH_DRAWER_FIELDS.map(f => f.key)).forEach(k => {
     opts[k] = Array.from(new Set(src.map(r => r[k]).filter(v => v !== undefined && v !== ''))).sort();
   });
   const ages = Array.from(new Set(src.map(r => r.intransit_ageing).filter(v => v !== undefined && v !== ''))).sort((a, b) => a - b);
@@ -2535,6 +2565,7 @@ function refreshLhFilterUI() {
     const el = document.getElementById(id);
     if (el) el.outerHTML = buildSelect(id, options, sel, ph);
   };
+  set('filter-lh-dc_liability', opts.dc_liability || [], f.dc_liability, 'All DCs');
   set('filter-lh-MM_origin', opts.MM_origin || [], f.MM_origin, 'All MM Origins');
   set('filter-lh-MM_destination', opts.MM_destination || [], f.MM_destination, 'All MM Destinations');
   set('filter-lh-intransit_ageing', ages, f.intransit_ageing, 'All Ageing');
@@ -2544,7 +2575,7 @@ function refreshLhFilterUI() {
     <div class="filter-field"><label>${escapeHtml(df.label)}</label>
     ${buildSelect('filter-lh-' + df.key, opts[df.key] || [], f[df.key], 'All')}</div>`).join('');
 
-  ['MM_origin', 'MM_destination', 'intransit_ageing'].concat(LH_DRAWER_FIELDS.map(d => d.key)).forEach(k => {
+  ['dc_liability', 'MM_origin', 'MM_destination', 'intransit_ageing'].concat(LH_DRAWER_FIELDS.map(d => d.key)).forEach(k => {
     const el = document.getElementById('filter-lh-' + k);
     if (el) el.onchange = e => { state.filters.LH[k] = e.target.value; renderLhDashboard(); };
   });
@@ -2560,7 +2591,7 @@ function wireLh() {
   });
   const clear = document.getElementById('clear-filters-LH');
   if (clear) clear.addEventListener('click', () => {
-    state.filters.LH = { MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' };
+    state.filters.LH = { dc_liability: 'All', MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' };
     LH_DRAWER_FIELDS.forEach(d => state.filters.LH[d.key] = 'All');
     refreshLhFilterUI(); renderLhDashboard();
   });
