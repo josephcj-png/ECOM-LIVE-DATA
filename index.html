@@ -628,6 +628,58 @@ function lhMissingColumns(fields) {
   return LH_REQUIRED_COLUMNS.filter(c => hmap[lhNormKey(c)] === undefined);
 }
 
+// Some exported .xlsx files have a title / blank / merged row above the real
+// header row. SheetJS then treats that junk row as the header and yields
+// "__EMPTY", "__EMPTY_1", ... column names. This scans the first rows of the
+// sheet and picks the row that best matches the expected column names, then
+// re-reads the sheet using that row as the header.
+// Returns { rows, fields, headerRowIndex }.
+function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows) {
+  maxScanRows = maxScanRows || 15;
+  const norm = n => String(n || '').toLowerCase().replace(/[\s_\-]+/g, '');
+  const wanted = (expectedNames || []).map(norm);
+
+  // Raw grid so we can inspect candidate header rows.
+  const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: true });
+  let bestRow = 0, bestScore = -1;
+  const limit = Math.min(maxScanRows, grid.length);
+  for (let r = 0; r < limit; r++) {
+    const cells = (grid[r] || []).map(norm).filter(Boolean);
+    if (!cells.length) continue;
+    let score = 0;
+    wanted.forEach(w => { if (cells.indexOf(w) !== -1) score++; });
+    // Prefer rows that both match expectations and look like a header
+    // (mostly non-empty, no "__empty" placeholders).
+    if (score > bestScore) { bestScore = score; bestRow = r; }
+  }
+  // If nothing matched at all, fall back to the first non-empty row.
+  if (bestScore <= 0) {
+    for (let r = 0; r < limit; r++) {
+      if ((grid[r] || []).some(c => String(c || '').trim() !== '')) { bestRow = r; break; }
+    }
+  }
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, range: bestRow });
+  const fields = rows.length ? Object.keys(rows[0]) : (grid[bestRow] || []).map(String);
+  return { rows: rows, fields: fields, headerRowIndex: bestRow };
+}
+
+// LH in-transit workbooks ship with several tabs (some of them summary /
+// working tabs). Only the tab named "base" holds the raw rows we want, so
+// select it explicitly rather than defaulting to the first sheet.
+// Matching is lenient: exact "base" (any case) wins, otherwise the first tab
+// whose name contains "base". Returns null when there is no such tab.
+function pickBaseSheetName(wb) {
+  const names = (wb && wb.SheetNames) || [];
+  const norm = n => String(n || '').toLowerCase().replace(/[\s_\-]+/g, '');
+  let exact = null, partial = null;
+  names.forEach(n => {
+    const k = norm(n);
+    if (k === 'base' && exact === null) exact = n;
+    else if (k.indexOf('base') !== -1 && partial === null) partial = n;
+  });
+  return exact || partial;
+}
+
 function computeLhFlow(row) {
   const f = normVal(row.flag).toLowerCase();
   if (!f) return '';
@@ -1195,12 +1247,13 @@ function parseExcelFile(direction, baseDate, file, callbacks) {
   reader.onload = function (e) {
     try {
       const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+      const ws = wb.Sheets[pickBaseSheetName(wb) || wb.SheetNames[0]];
+      const det = readSheetWithHeaderDetection(ws, REQUIRED_RAW_COLUMNS);
+      const rows = det.rows;
       if (!rows.length) { callbacks.onError('No rows found in file.'); return; }
-      const missingCols = validateColumns(Object.keys(rows[0]));
+      const missingCols = validateColumns(det.fields);
       if (missingCols.length) {
-        callbacks.onError(`Missing required columns: ${missingCols.join(', ')}`);
+        callbacks.onError(`Missing required columns: ${missingCols.join(', ')}. Columns found: ${det.fields.join(', ')}`);
         return;
       }
       let buffer = [];
@@ -2116,13 +2169,20 @@ function startLhUpload(file, baseDate) {
     reader.onload = ev => {
       try {
         const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
+        const baseName = pickBaseSheetName(wb);
+        if (!baseName) {
+          onErr('No "base" tab found in this workbook. Tabs present: ' + (wb.SheetNames || []).join(', '));
+          return;
+        }
+        const det = readSheetWithHeaderDetection(wb.Sheets[baseName], LH_COLUMNS);
+        const rows = det.rows;
         if (!rows.length) { onErr('No rows found.'); return; }
-        const fields = Object.keys(rows[0]);
+        const fields = det.fields;
         const missing = lhMissingColumns(fields);
         if (missing.length) {
           onErr('Missing required columns: ' + missing.join(', ') +
-                '. Columns found in the file: ' + fields.join(', '));
+                '. (Reading tab "' + baseName + '", header row ' + (det.headerRowIndex + 1) + '.) ' +
+                'Columns found: ' + fields.join(', '));
           return;
         }
         const hmap = lhHeaderMap(fields);
