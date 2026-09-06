@@ -639,45 +639,93 @@ function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows) {
   const norm = n => String(n || '').toLowerCase().replace(/[\s_\-]+/g, '');
   const wanted = (expectedNames || []).map(norm);
 
-  // Raw grid so we can inspect candidate header rows.
   const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: true });
-  let bestRow = 0, bestScore = -1;
+  let bestRow = -1, bestScore = 0;
   const limit = Math.min(maxScanRows, grid.length);
   for (let r = 0; r < limit; r++) {
     const cells = (grid[r] || []).map(norm).filter(Boolean);
-    if (!cells.length) continue;
+    if (cells.length < 2) continue;              // a header needs several cells
+    if (r >= grid.length - 1) continue;          // must have data rows beneath it
     let score = 0;
     wanted.forEach(w => { if (cells.indexOf(w) !== -1) score++; });
-    // Prefer rows that both match expectations and look like a header
-    // (mostly non-empty, no "__empty" placeholders).
     if (score > bestScore) { bestScore = score; bestRow = r; }
   }
-  // If nothing matched at all, fall back to the first non-empty row.
-  if (bestScore <= 0) {
+  // Fall back to the first row that looks like a header (>=2 non-empty cells)
+  // and still has rows beneath it.
+  if (bestRow < 0) {
     for (let r = 0; r < limit; r++) {
-      if ((grid[r] || []).some(c => String(c || '').trim() !== '')) { bestRow = r; break; }
+      const cells = (grid[r] || []).filter(c => String(c || '').trim() !== '');
+      if (cells.length >= 2 && r < grid.length - 1) { bestRow = r; break; }
     }
   }
-  const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, range: bestRow });
+  if (bestRow < 0) bestRow = 0;
+
+  let rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, range: bestRow });
+  // Last-resort: if slicing produced nothing, read the sheet as-is.
+  if (!rows.length && bestRow !== 0) {
+    bestRow = 0;
+    rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+  }
   const fields = rows.length ? Object.keys(rows[0]) : (grid[bestRow] || []).map(String);
-  return { rows: rows, fields: fields, headerRowIndex: bestRow };
+  return { rows: rows, fields: fields, headerRowIndex: bestRow, gridRows: grid.length };
 }
 
-// LH in-transit workbooks ship with several tabs (some of them summary /
-// working tabs). Only the tab named "base" holds the raw rows we want, so
-// select it explicitly rather than defaulting to the first sheet.
-// Matching is lenient: exact "base" (any case) wins, otherwise the first tab
-// whose name contains "base". Returns null when there is no such tab.
+function sheetRowCount(ws) {
+  try {
+    if (!ws || !ws['!ref']) return 0;
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    return (range.e.r - range.s.r) + 1;
+  } catch (e) { return 0; }
+}
+
+// LH workbooks ship with several tabs (summary / working / notes). Only the
+// tab named "base" holds the rows we want. Exact "base" wins; otherwise the
+// first tab containing "base". Empty tabs are skipped so a stray "Base Notes"
+// sheet can't shadow the real one.
 function pickBaseSheetName(wb) {
   const names = (wb && wb.SheetNames) || [];
   const norm = n => String(n || '').toLowerCase().replace(/[\s_\-]+/g, '');
-  let exact = null, partial = null;
+  const withData = n => sheetRowCount(wb.Sheets[n]) > 1;
+  let exact = null, exactEmpty = null, partial = null;
   names.forEach(n => {
     const k = norm(n);
-    if (k === 'base' && exact === null) exact = n;
-    else if (k.indexOf('base') !== -1 && partial === null) partial = n;
+    if (k === 'base') { if (withData(n)) { if (!exact) exact = n; } else if (!exactEmpty) exactEmpty = n; }
+    else if (k.indexOf('base') !== -1 && withData(n) && !partial) partial = n;
   });
-  return exact || partial;
+  return exact || partial || exactEmpty;
+}
+
+// Finds the usable in-transit data in a multi-tab workbook.
+// Tries the "base" tab first (that is where the data lives), then falls back
+// to any other tab that yields the required columns — so a renamed tab still
+// works instead of failing outright. Always returns a per-tab report so a
+// failure message can say exactly what was tried and why each tab was rejected.
+function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
+  const names = (wb && wb.SheetNames) || [];
+  const preferred = pickBaseSheetName(wb);
+  const order = preferred ? [preferred].concat(names.filter(n => n !== preferred)) : names.slice();
+  const report = [];
+
+  for (let i = 0; i < order.length; i++) {
+    const name = order[i];
+    const ws = wb.Sheets[name];
+    if (!ws || !ws['!ref']) { report.push('"' + name + '": empty'); continue; }
+    let det;
+    try { det = readSheetWithHeaderDetection(ws, expectedNames); }
+    catch (e) { report.push('"' + name + '": unreadable'); continue; }
+    if (!det.rows.length) { report.push('"' + name + '": header row ' + (det.headerRowIndex + 1) + ', no data rows'); continue; }
+    const hmap = lhHeaderMap(det.fields);
+    const norm = k => String(k || '').toLowerCase().replace(/[\s_\-]+/g, '');
+    const missing = (requiredNames || []).filter(c => hmap[norm(c)] === undefined);
+    if (missing.length) {
+      report.push('"' + name + '": ' + det.rows.length + ' rows but missing ' + missing.join('/') +
+                  ' (found: ' + det.fields.slice(0, 8).join(', ') + ')');
+      continue;
+    }
+    return { ok: true, sheetName: name, rows: det.rows, fields: det.fields,
+             headerRowIndex: det.headerRowIndex, report: report };
+  }
+  return { ok: false, report: report.length ? report : ['workbook has no readable sheets'] };
 }
 
 function computeLhFlow(row) {
@@ -1152,9 +1200,11 @@ async function refreshTrendData(direction) {
       state.trends[direction] = data.rows;
       return;
     } catch (err) {
-      // API went down mid-session: fall through to local data rather than erroring out.
       state.apiStatus = 'error';
       renderApiStatus();
+      setStatus(direction, 'Could not load trend data from Google Sheets: ' + err.message +
+        ' — showing only data uploaded in this browser session.', 'error');
+      console.error('getTrend failed for ' + direction + ':', err);
     }
   }
   state.trends[direction] = aggregateLocalTrend(state.localRaw[direction], params);
@@ -1171,12 +1221,19 @@ async function refreshFilterOptionsAndSummary(direction) {
       ]);
       state.filterOptions[direction] = filters;
       state.summary[direction] = summary;
+      if (summary && summary.datesCovered > 0) {
+        setStatus(direction, `Loaded ${summary.datesCovered} day(s) of stored data from Google Sheets (latest: ${fmtDisplayDate(summary.latestBaseDate)}).`, 'success');
+      }
       return;
     } catch (err) {
-      // API unreachable — fall through to local so the dashboard still works.
+      // Surface this. Previously it only logged to the console, so a backend
+      // that was reachable-but-erroring looked identical to "no data yet" —
+      // the dashboard just showed an empty state with no explanation.
       state.apiStatus = 'error';
       renderApiStatus();
-      console.error('Could not load filters/summary for ' + direction + ', falling back to local:', err);
+      setStatus(direction, 'Could not load stored data from Google Sheets: ' + err.message +
+        ' — showing only data uploaded in this browser session.', 'error');
+      console.error('Could not load filters/summary for ' + direction + ':', err);
     }
   }
   {
@@ -1364,11 +1421,30 @@ function applyLocalFilters(direction) {
 
 /* ---------------------------- RENDERING --------------------------------- */
 
+// The empty state now explains WHY it is empty, so a backend/deployment
+// problem is never mistaken for "no data has been uploaded".
 function emptyStateHTML(direction) {
+  const icon = direction === 'Forward' ? '&#8594;' : '&#8592;';
+  let why;
+  if (!state.apiUrl) {
+    why = 'No backend configured — open Settings (\u2699) and paste your Apps Script URL. Without it, data only lives in this browser tab.';
+  } else if (state.apiStatus !== 'connected') {
+    why = 'Cannot reach the backend: ' + escapeHtml(state.apiStatusMessage || 'unknown error') +
+          '<br>Check the Apps Script deployment is live and set to "Anyone".';
+  } else {
+    const sum = state.summary[direction];
+    if (sum && Number(sum.datesCovered) > 0) {
+      why = 'The backend reports ' + fmtInt(sum.datesCovered) + ' date(s) stored, but no rows came back for the current filters. Try <em>Clear Filters</em>.';
+    } else {
+      why = 'Connected to the backend, but it holds <strong>no ' + direction + ' data</strong>.<br>' +
+            'If you have uploaded files before, the sheet was most likely written by an older ' +
+            'version of Code.gs. Re-deploy Code.gs (Deploy &rarr; Manage deployments &rarr; New version) and re-upload.';
+    }
+  }
   return `<div class="empty-state">
-    <div class="empty-icon">${direction === 'Forward' ? '&#8594;' : '&#8592;'}</div>
-    <h3>No ${direction} Data Available</h3>
-    <p>Upload a ${direction} base file to see pendency trends here.</p>
+    <div class="empty-icon">${icon}</div>
+    <h3>No ${direction} Data Shown</h3>
+    <p>${why}</p>
   </div>`;
 }
 
@@ -2169,22 +2245,13 @@ function startLhUpload(file, baseDate) {
     reader.onload = ev => {
       try {
         const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
-        const baseName = pickBaseSheetName(wb);
-        if (!baseName) {
-          onErr('No "base" tab found in this workbook. Tabs present: ' + (wb.SheetNames || []).join(', '));
+        const res = readWorkbookPreferringBase(wb, LH_COLUMNS, LH_REQUIRED_COLUMNS);
+        if (!res.ok) {
+          onErr('Could not find usable in-transit data. Tried each tab: ' + res.report.join(' | '));
           return;
         }
-        const det = readSheetWithHeaderDetection(wb.Sheets[baseName], LH_COLUMNS);
-        const rows = det.rows;
-        if (!rows.length) { onErr('No rows found.'); return; }
-        const fields = det.fields;
-        const missing = lhMissingColumns(fields);
-        if (missing.length) {
-          onErr('Missing required columns: ' + missing.join(', ') +
-                '. (Reading tab "' + baseName + '", header row ' + (det.headerRowIndex + 1) + '.) ' +
-                'Columns found: ' + fields.join(', '));
-          return;
-        }
+        const rows = res.rows;
+        const fields = res.fields;
         const hmap = lhHeaderMap(fields);
         const buffer = [];
         rows.forEach(r => { const rec = processLhRow(baseDate, r, hmap); if (rec) buffer.push(rec); });
