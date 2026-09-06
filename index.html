@@ -584,7 +584,7 @@ const LH_AGE_RANGE = [1, 30];
 // Dimensions stored in the LH trend summary (counts only, same as floor).
 const LH_TREND_DIMENSIONS = [
   'lh_flow', 'lh_category', 'dc_liability',
-  'MM_origin', 'MM_destination', 'Zone', 'movement_type',
+  'MM_origin', 'MM_destination', 'Zone', 'movement_type', 'Lane Code',
   'MM_origin_type', 'MM_destination_type', 'MM_Status', 'Volumetric_flag', 'client_tag'
 ];
 // Same rule for LH: only the dimensions stored in LH_TREND_DIMENSIONS.
@@ -607,14 +607,28 @@ const LH_DRAWER_FIELDS = [
 const LH_CAT_ORIGIN = 'DC as MM origin';
 const LH_CAT_DEST = 'DC as MM Destination';
 
+// Which MM_*_type value marks the DC that owns the pendency.
+// The logic image showed "MM"; the spoken spec said "DC". Both are accepted
+// so the tables populate either way — set LH_STRICT_TYPE to a single value
+// if you want only one of them to qualify.
+const LH_DC_TYPE_VALUES = ['DC', 'MM'];
+const LH_STRICT_TYPE = null; // e.g. 'DC' to accept only DC
+
 // The four tables: Forward/Reverse x the two categories. All are keyed on
 // dc_liability, which already resolves to MM_origin or MM_destination.
 const LH_TABLES = [
-  { key: 'FWD_origin', flow: 'Forward', category: LH_CAT_ORIGIN, title: 'Forward — DC as MM Origin' },
   { key: 'FWD_dest',   flow: 'Forward', category: LH_CAT_DEST,   title: 'Forward — DC as MM Destination' },
+  { key: 'FWD_origin', flow: 'Forward', category: LH_CAT_ORIGIN, title: 'Forward — DC as MM Origin' },
   { key: 'REV_origin', flow: 'Reverse', category: LH_CAT_ORIGIN, title: 'Reverse — DC as MM Origin' },
   { key: 'REV_dest',   flow: 'Reverse', category: LH_CAT_DEST,   title: 'Reverse — DC as MM Destination' }
 ];
+
+// LH drill-down chain: DC liability -> movement type -> lane.
+const LH_DRILL_CHAIN = ['dc_liability', 'movement_type', 'Lane Code'];
+function lhChildDimension(current) {
+  const i = LH_DRILL_CHAIN.indexOf(current);
+  return (i === -1 || i + 1 >= LH_DRILL_CHAIN.length) ? null : LH_DRILL_CHAIN[i + 1];
+}
 
 // Normalises the `flag` column into Forward / Reverse.
 // LH base files come from different reports and the header spelling varies
@@ -750,7 +764,9 @@ function computeLhFlow(row) {
 
 // Is this MM type value the "MM" marker the logic sheet refers to?
 function isMmType(v) {
-  return normVal(v).toUpperCase() === 'MM';
+  const t = normVal(v).toUpperCase();
+  if (LH_STRICT_TYPE) return t === String(LH_STRICT_TYPE).toUpperCase();
+  return LH_DC_TYPE_VALUES.indexOf(t) !== -1;
 }
 
 // Returns an ARRAY of records — one per LH category the row qualifies for.
@@ -848,6 +864,7 @@ const state = {
   //   { groupBy, filters:{...}, label } describing one level of drill-down.
   // Empty = showing the top-level pivot summary only.
   drilldown: { Forward: [], Reverse: [], LH: [] },
+  lhDrill: {},
   charts: {}
 };
 
@@ -2509,8 +2526,12 @@ async function renderLhDashboard() {
 
   container.innerHTML = LH_TABLES.map(t => `
     <div class="bucket-card">
-      <div class="bucket-head"><h3>${escapeHtml(t.title)}</h3><span class="bucket-count" id="lhcount-${t.key}">0</span></div>
+      <div class="bucket-head">
+        <h3>${escapeHtml(t.title)}</h3>
+        <span class="bucket-count" id="lhcount-${t.key}">0</span>
+      </div>
       <div class="table-scroll"><table class="pivot-table" id="lhtable-${t.key}"></table></div>
+      <div class="drilldown-panel" id="lhdrill-${t.key}"></div>
     </div>`).join('');
 
   LH_TABLES.forEach(t => {
@@ -2534,7 +2555,8 @@ async function renderLhDashboard() {
     keys.forEach(g => {
       const rowTot = allDates.reduce((s2, d) => s2 + grid[g][d], 0);
       if (!rowTot) return;
-      tbody += `<tr><td class="sticky-col">${escapeHtml(g)}</td>`;
+      tbody += `<tr class="drill-row" data-value="${escapeAttr(g)}" title="Click for movement type breakdown">`;
+      tbody += `<td class="sticky-col"><span class="drill-caret">&#9656;</span> ${escapeHtml(g)}</td>`;
       allDates.forEach(d => { colTot[d] += grid[g][d]; tbody += `<td>${grid[g][d] ? fmtInt(grid[g][d]) : ''}</td>`; });
       tbody += `<td><strong>${fmtInt(rowTot)}</strong></td></tr>`;
     });
@@ -2544,12 +2566,101 @@ async function renderLhDashboard() {
     tfoot += `<td>${fmtInt(tot)}</td></tr></tfoot>`;
 
     const el = document.getElementById('lhtable-' + t.key);
-    if (el) el.innerHTML = thead + tbody + tfoot;
+    if (el) {
+      el.innerHTML = thead + tbody + tfoot;
+      el.querySelectorAll('tr.drill-row').forEach(tr => {
+        tr.addEventListener('click', () => {
+          state.lhDrill[t.key] = [{ groupBy: 'dc_liability', value: tr.getAttribute('data-value') }];
+          renderLhDrilldown(t);
+        });
+      });
+      renderLhDrilldown(t);
+    }
     const c = document.getElementById('lhcount-' + t.key);
     if (c) c.textContent = fmtInt(tot);
   });
 
   refreshLhFilterUI();
+}
+
+// LH drill-down: DC liability -> movement type -> lane.
+// Works off the same aggregated rows already in state.trends.LH, so it needs
+// no extra round trip and keeps working after raw data is gone.
+function renderLhDrilldown(t) {
+  const panel = document.getElementById('lhdrill-' + t.key);
+  if (!panel) return;
+  const stack = state.lhDrill[t.key] || [];
+  if (!stack.length) { panel.innerHTML = ''; return; }
+
+  const rows = (state.trends.LH || []).filter(r =>
+    String(r.lh_flow) === t.flow && String(r.lh_category) === t.category);
+
+  // apply each level of the stack as an equality filter
+  let scoped = rows;
+  stack.forEach(lvl => {
+    scoped = scoped.filter(r => String(normVal(r[lvl.groupBy]) || '(blank)') === String(lvl.value));
+  });
+
+  const level = stack[stack.length - 1];
+  const childDim = lhChildDimension(level.groupBy);
+  const dates = Array.from(new Set(rows.map(r => r.base_date))).sort();
+
+  const crumbs = ['<span class="crumb" data-idx="-1">' + escapeHtml(t.title) + '</span>']
+    .concat(stack.map((lvl, i) => '<span class="crumb-sep">&rsaquo;</span><span class="crumb" data-idx="' + i + '">' + escapeHtml(lvl.value) + '</span>'));
+
+  let html = '<div class="drilldown-breadcrumb">' + crumbs.join(' ') + '</div>';
+
+  if (!childDim) {
+    html += '<div class="muted" style="padding:6px 0;">Deepest level (lane).</div>';
+    panel.innerHTML = html;
+  } else {
+    const grid = {};
+    scoped.forEach(r => {
+      const g = normVal(r[childDim]) || '(blank)';
+      if (!grid[g]) { grid[g] = {}; dates.forEach(d => grid[g][d] = 0); }
+      grid[g][r.base_date] += Number(r.count) || 0;
+    });
+    const keys = Object.keys(grid).sort((a, b) =>
+      dates.reduce((s2, d) => s2 + grid[b][d], 0) - dates.reduce((s2, d) => s2 + grid[a][d], 0));
+    const nextDim = lhChildDimension(childDim);
+
+    let thead = '<thead><tr><th class="sticky-col">' + escapeHtml(childDim === 'Lane Code' ? 'Lane' : 'Movement Type') + '</th>';
+    dates.forEach(d => thead += '<th title="' + escapeAttr(d) + '">' + escapeHtml(fmtDisplayDate(d)) + '</th>');
+    thead += '<th>Total</th></tr></thead>';
+
+    let tbody = '<tbody>';
+    keys.forEach(g => {
+      const tot = dates.reduce((s2, d) => s2 + grid[g][d], 0);
+      if (!tot) return;
+      tbody += '<tr class="' + (nextDim ? 'drill-row' : '') + '" data-value="' + escapeAttr(g) + '">';
+      tbody += '<td class="sticky-col">' + (nextDim ? '<span class="drill-caret">&#9656;</span> ' : '') + escapeHtml(g) + '</td>';
+      dates.forEach(d => tbody += '<td>' + (grid[g][d] ? fmtInt(grid[g][d]) : '') + '</td>');
+      tbody += '<td><strong>' + fmtInt(tot) + '</strong></td></tr>';
+    });
+    tbody += '</tbody>';
+
+    html += '<div class="bucket-head" style="margin-top:8px;"><h4 style="margin:0;">' +
+            escapeHtml(level.value) + ' — by ' + escapeHtml(childDim === 'Lane Code' ? 'Lane' : 'Movement Type') + '</h4></div>' +
+            '<div class="table-scroll"><table class="pivot-table">' + thead + tbody + '</table></div>';
+    panel.innerHTML = html;
+
+    if (nextDim) {
+      panel.querySelectorAll('tr.drill-row').forEach(tr => {
+        tr.addEventListener('click', () => {
+          state.lhDrill[t.key] = stack.concat([{ groupBy: childDim, value: tr.getAttribute('data-value') }]);
+          renderLhDrilldown(t);
+        });
+      });
+    }
+  }
+
+  panel.querySelectorAll('.crumb').forEach(c => {
+    c.addEventListener('click', () => {
+      const idx = parseInt(c.getAttribute('data-idx'), 10);
+      state.lhDrill[t.key] = idx < 0 ? [] : stack.slice(0, idx + 1);
+      renderLhDrilldown(t);
+    });
+  });
 }
 
 function refreshLhFilterUI() {
