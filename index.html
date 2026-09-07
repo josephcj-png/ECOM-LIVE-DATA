@@ -641,20 +641,33 @@ function lhNormKey(k) {
   return String(k || '').toLowerCase().replace(/[\s_\-]+/g, '');
 }
 // Builds { normalisedHeader -> actualHeader } for a parsed row's fields.
+// Builds { normalisedHeader -> actualHeader }. This file format contains BOTH
+// "MM_origin_type" and "mm_origin_type" (likewise for destination), which
+// normalise to the same key — so exact matches are recorded separately and
+// always win, and the first normalised variant wins over later ones.
 function lhHeaderMap(fields) {
-  const map = {};
-  (fields || []).forEach(f => { if (f) map[lhNormKey(f)] = f; });
+  const map = { __exact: {} };
+  (fields || []).forEach(f => {
+    if (!f) return;
+    map.__exact[String(f).trim()] = f;
+    const k = lhNormKey(f);
+    if (!(k in map)) map[k] = f;
+  });
   return map;
 }
 // Reads a logical LH column out of a row using the tolerant header map.
 function lhGet(row, hmap, logicalName) {
+  if (hmap && hmap.__exact && hmap.__exact[logicalName] !== undefined) {
+    return row[hmap.__exact[logicalName]];
+  }
   const actual = hmap[lhNormKey(logicalName)];
   return actual === undefined ? '' : row[actual];
 }
 // Which of the required LH columns are genuinely absent.
 function lhMissingColumns(fields) {
   const hmap = lhHeaderMap(fields);
-  return LH_REQUIRED_COLUMNS.filter(c => hmap[lhNormKey(c)] === undefined);
+  return LH_REQUIRED_COLUMNS.filter(c =>
+    hmap.__exact[c] === undefined && hmap[lhNormKey(c)] === undefined);
 }
 
 // Some exported .xlsx files have a title / blank / merged row above the real
@@ -708,8 +721,30 @@ function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows, requiredNa
            reqHits: best ? best.reqHits : 0, preview: preview };
 }
 
+// Some exporters write a sheet without the "!ref" range marker. SheetJS then
+// reports the sheet as empty even though the cells are present. Rebuild the
+// range from the cell addresses so those files still load.
+function ensureSheetRef(ws) {
+  if (!ws || ws['!ref']) return ws;
+  let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
+  Object.keys(ws).forEach(k => {
+    if (k[0] === '!') return;
+    let cell;
+    try { cell = XLSX.utils.decode_cell(k); } catch (e) { return; }
+    if (!cell || isNaN(cell.r) || isNaN(cell.c)) return;
+    if (cell.r < minR) minR = cell.r;
+    if (cell.r > maxR) maxR = cell.r;
+    if (cell.c < minC) minC = cell.c;
+    if (cell.c > maxC) maxC = cell.c;
+  });
+  if (maxR < 0 || maxC < 0) return ws;
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: minR, c: minC }, e: { r: maxR, c: maxC } });
+  return ws;
+}
+
 function sheetRowCount(ws) {
   try {
+    ensureSheetRef(ws);
     if (!ws || !ws['!ref']) return 0;
     const range = XLSX.utils.decode_range(ws['!ref']);
     return (range.e.r - range.s.r) + 1;
@@ -746,7 +781,7 @@ function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
 
   for (let i = 0; i < order.length; i++) {
     const name = order[i];
-    const ws = wb.Sheets[name];
+    const ws = ensureSheetRef(wb.Sheets[name]);
     if (!ws || !ws['!ref']) { report.push('"' + name + '": no cells'); continue; }
     let det;
     try { det = readSheetWithHeaderDetection(ws, expectedNames, 50, requiredNames); }
@@ -754,7 +789,8 @@ function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
     if (!det.rows.length) { report.push('"' + name + '": header row ' + (det.headerRowIndex + 1) + ', no data rows'); continue; }
     const hmap = lhHeaderMap(det.fields);
     const norm = k => String(k || '').toLowerCase().replace(/[\s_\-]+/g, '');
-    const missing = (requiredNames || []).filter(c => hmap[norm(c)] === undefined);
+    const missing = (requiredNames || []).filter(c =>
+      hmap.__exact[c] === undefined && hmap[norm(c)] === undefined);
     if (missing.length) {
       report.push('"' + name + '": ' + det.rows.length + ' rows but missing ' + missing.join('/') +
                   ' (found: ' + det.fields.slice(0, 8).join(', ') + ')');
@@ -769,7 +805,7 @@ function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
   try {
     let widest = null;
     order.forEach(n => {
-      const ws2 = wb.Sheets[n];
+      const ws2 = ensureSheetRef(wb.Sheets[n]);
       if (!ws2 || !ws2['!ref']) return;
       const d = readSheetWithHeaderDetection(ws2, expectedNames, 50, requiredNames);
       if (!widest || d.gridRows > widest.gridRows) widest = { name: n, det: d };
@@ -1454,7 +1490,7 @@ function parseExcelFile(direction, baseDate, file, callbacks) {
   reader.onload = function (e) {
     try {
       const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
-      const ws = wb.Sheets[pickBaseSheetName(wb) || wb.SheetNames[0]];
+      const ws = ensureSheetRef(wb.Sheets[pickBaseSheetName(wb) || wb.SheetNames[0]]);
       const det = readSheetWithHeaderDetection(ws, REQUIRED_RAW_COLUMNS);
       const rows = det.rows;
       if (!rows.length) { callbacks.onError('No rows found in file.'); return; }
