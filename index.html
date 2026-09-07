@@ -676,6 +676,36 @@ function lhMissingColumns(fields) {
 // sheet and picks the row that best matches the expected column names, then
 // re-reads the sheet using that row as the header.
 // Returns { rows, fields, headerRowIndex }.
+// Builds row objects from the raw grid using an explicit header row index.
+// We do NOT use sheet_to_json({range:N}) for this: when the header row has
+// blank leading cells, SheetJS invents "__EMPTY", "__EMPTY_1" ... names and
+// the real column titles are lost. Reading the grid ourselves keeps the true
+// header text, and blank/duplicate header cells are handled deterministically.
+function rowsFromGrid(grid, headerRowIndex) {
+  const rawHeader = grid[headerRowIndex] || [];
+  const header = rawHeader.map(h => String(h === undefined || h === null ? '' : h).trim());
+  const out = [];
+  for (let r = headerRowIndex + 1; r < grid.length; r++) {
+    const line = grid[r] || [];
+    // skip fully blank lines (trailing notes / spacer rows)
+    let any = false;
+    for (let c = 0; c < line.length; c++) {
+      if (String(line[c] === undefined || line[c] === null ? '' : line[c]).trim() !== '') { any = true; break; }
+    }
+    if (!any) continue;
+    const obj = {};
+    for (let c = 0; c < header.length; c++) {
+      const name = header[c];
+      if (!name) continue;                       // ignore blank header columns
+      if (obj[name] !== undefined) continue;     // first occurrence wins
+      const v = line[c];
+      obj[name] = v === undefined || v === null ? '' : v;
+    }
+    out.push(obj);
+  }
+  return { rows: out, fields: header.filter(Boolean) };
+}
+
 function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows, requiredNames) {
   maxScanRows = maxScanRows || 50;
   const norm = n => String(n || '').toLowerCase().replace(/[\s_\-]+/g, '');
@@ -708,13 +738,10 @@ function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows, requiredNa
     }
   }
 
-  let bestRow = best ? best.row : 0;
-  let rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, range: bestRow });
-  if (!rows.length && bestRow !== 0) {
-    bestRow = 0;
-    rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
-  }
-  const fields = rows.length ? Object.keys(rows[0]) : (grid[bestRow] || []).map(String);
+  const bestRow = best ? best.row : 0;
+  const built = rowsFromGrid(grid, bestRow);
+  const rows = built.rows;
+  const fields = built.fields.length ? built.fields : (grid[bestRow] || []).map(String);
   // A compact preview of the sheet's first rows, for diagnostics when nothing matches.
   const preview = grid.slice(0, 5).map(r => (r || []).slice(0, 14).map(c => String(c || '')).join(' | '));
   return { rows: rows, fields: fields, headerRowIndex: bestRow, gridRows: grid.length,
@@ -724,6 +751,29 @@ function readSheetWithHeaderDetection(ws, expectedNames, maxScanRows, requiredNa
 // Some exporters write a sheet without the "!ref" range marker. SheetJS then
 // reports the sheet as empty even though the cells are present. Rebuild the
 // range from the cell addresses so those files still load.
+// Produces a full description of what SheetJS actually parsed, so an upload
+// failure can be diagnosed from the message alone instead of by guesswork.
+function describeWorkbook(wb, bytes) {
+  const lines = [];
+  lines.push('file bytes: ' + (bytes === undefined ? '?' : bytes));
+  const names = (wb && wb.SheetNames) || [];
+  lines.push('tabs (' + names.length + '): ' + (names.length ? names.map(n => '"' + n + '"').join(', ') : 'NONE'));
+  names.forEach(n => {
+    const ws = wb.Sheets[n];
+    if (!ws) { lines.push('  "' + n + '": <missing from Sheets map>'); return; }
+    const cellKeys = Object.keys(ws).filter(k => k[0] !== '!');
+    let dims = ws['!ref'] || '(no !ref)';
+    let firstCells = cellKeys.slice(0, 8).map(k => {
+      const v = ws[k] && ws[k].v !== undefined ? String(ws[k].v).slice(0, 18) : '';
+      return k + '=' + v;
+    }).join(' ; ');
+    lines.push('  "' + n + '": ref=' + dims + ', cells=' + cellKeys.length +
+               (ws['!merges'] ? ', merges=' + ws['!merges'].length : '') +
+               (cellKeys.length ? ' | ' + firstCells : ''));
+  });
+  return lines.join(' || ');
+}
+
 function ensureSheetRef(ws) {
   if (!ws || ws['!ref']) return ws;
   let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
@@ -815,6 +865,31 @@ function readWorkbookPreferringBase(wb, expectedNames, requiredNames) {
         widest.det.preview.map((p, i) => '[row ' + (i + 1) + '] ' + p).join('  ');
     }
   } catch (e) {}
+  // Last-resort rescue: scan every sheet's raw grid for a row that contains
+  // the required column names ANYWHERE, ignoring all the earlier heuristics.
+  // This catches unusual layouts (odd offsets, stray leading columns) that the
+  // structured detection rejects.
+  for (let i = 0; i < order.length; i++) {
+    const ws = ensureSheetRef(wb.Sheets[order[i]]);
+    if (!ws || !ws['!ref']) continue;
+    let grid;
+    try { grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: true }); }
+    catch (e) { continue; }
+    const normc = k => String(k || '').toLowerCase().replace(/[\s_\-]+/g, '');
+    const req = (requiredNames || []).map(normc);
+    for (let r = 0; r < grid.length; r++) {
+      const cells = (grid[r] || []).map(normc);
+      const hits = req.filter(w => cells.indexOf(w) !== -1).length;
+      if (hits === req.length && r < grid.length - 1) {
+        const built2 = rowsFromGrid(grid, r);
+        if (built2.rows.length) {
+          return { ok: true, sheetName: order[i], rows: built2.rows,
+                   fields: built2.fields, headerRowIndex: r,
+                   report: report.concat(['rescued from "' + order[i] + '" at row ' + (r + 1)]) };
+        }
+      }
+    }
+  }
   return { ok: false, report: (report.length ? report : ['workbook has no readable sheets']), preview: previewText };
 }
 
@@ -2432,10 +2507,21 @@ function startLhUpload(file, baseDate) {
     const reader = new FileReader();
     reader.onload = ev => {
       try {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+        const bytes = ev.target.result ? ev.target.result.byteLength : undefined;
+        let wb;
+        try {
+          // cellDates keeps date cells usable; sheetStubs preserves empty cells
+          // so a sparse sheet still yields a usable range.
+          wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array', cellDates: true, sheetStubs: true });
+        } catch (readErr) {
+          onErr('Excel file could not be parsed: ' + (readErr.message || readErr) +
+                ' — if this file is .xlsb or password-protected, re-save it as .xlsx or .csv.');
+          return;
+        }
         const res = readWorkbookPreferringBase(wb, LH_COLUMNS, LH_REQUIRED_COLUMNS);
         if (!res.ok) {
-          onErr('Could not find usable in-transit data. Tried each tab: ' + res.report.join(' | ') + (res.preview || ''));
+          onErr('Could not find usable in-transit data. Tried each tab: ' + res.report.join(' | ') +
+                (res.preview || '') + ' || DIAGNOSTICS -> ' + describeWorkbook(wb, bytes));
           return;
         }
         const rows = res.rows;
