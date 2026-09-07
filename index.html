@@ -607,12 +607,15 @@ const LH_DRAWER_FIELDS = [
 const LH_CAT_ORIGIN = 'DC as MM origin';
 const LH_CAT_DEST = 'DC as MM Destination';
 
-// Which MM_*_type value marks the DC that owns the pendency.
-// The logic image showed "MM"; the spoken spec said "DC". Both are accepted
-// so the tables populate either way — set LH_STRICT_TYPE to a single value
-// if you want only one of them to qualify.
-const LH_DC_TYPE_VALUES = ['DC', 'MM'];
-const LH_STRICT_TYPE = null; // e.g. 'DC' to accept only DC
+// Which MM_*_type values qualify a side as the DC that owns the pendency.
+// null  = "all" (no filter on that type column — every row qualifies)
+// array = only these values qualify (compared upper-case)
+//
+// Per the latest instruction, MM_origin_type is "all": a row contributes to
+// the origin category regardless of its origin type, as long as MM_origin has
+// a value. The destination side still requires a DC-type value.
+const LH_ORIGIN_TYPE_VALUES = null;             // "all"
+const LH_DESTINATION_TYPE_VALUES = ['DC', 'MM']; // set to null for "all"
 
 // The four tables: Forward/Reverse x the two categories. All are keyed on
 // dc_liability, which already resolves to MM_origin or MM_destination.
@@ -788,10 +791,10 @@ function computeLhFlow(row) {
 }
 
 // Is this MM type value the "MM" marker the logic sheet refers to?
-function isMmType(v) {
-  const t = normVal(v).toUpperCase();
-  if (LH_STRICT_TYPE) return t === String(LH_STRICT_TYPE).toUpperCase();
-  return LH_DC_TYPE_VALUES.indexOf(t) !== -1;
+// allowed === null means "all" (no filter).
+function typeQualifies(v, allowed) {
+  if (allowed === null || allowed === undefined) return true;
+  return allowed.indexOf(normVal(v).toUpperCase()) !== -1;
 }
 
 // Returns an ARRAY of records — one per LH category the row qualifies for.
@@ -817,10 +820,10 @@ function processLhRow(baseDate, row, hmap) {
   base.direction = 'LH';
 
   const out = [];
-  if (isMmType(base.MM_origin_type) && base.MM_origin) {
+  if (base.MM_origin && typeQualifies(base.MM_origin_type, LH_ORIGIN_TYPE_VALUES)) {
     out.push(Object.assign({}, base, { lh_category: LH_CAT_ORIGIN, dc_liability: base.MM_origin }));
   }
-  if (isMmType(base.MM_destination_type) && base.MM_destination) {
+  if (base.MM_destination && typeQualifies(base.MM_destination_type, LH_DESTINATION_TYPE_VALUES)) {
     out.push(Object.assign({}, base, { lh_category: LH_CAT_DEST, dc_liability: base.MM_destination }));
   }
   return out;
