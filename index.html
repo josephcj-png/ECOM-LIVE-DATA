@@ -2139,7 +2139,7 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
     locs.forEach(loc => {
       const locTotal = allDates.reduce((s2, d) => s2 + locGrid[a][loc][d], 0);
       if (!locTotal) return;
-      tbody += `<tr class="loc-row loc-of-${safeId}-${a}"${expanded ? '' : ' style="display:none;"'}>`;
+      tbody += `<tr class="loc-row loc-of-${safeId}-${a}" data-dc="${escapeAttr(loc)}"${expanded ? '' : ' style="display:none;"'}>`;
       tbody += `<td class="sticky-col loc-cell">${escapeHtml(loc)}</td>`;
       allDates.forEach(d => {
         const v = locGrid[a][loc][d];
@@ -2158,11 +2158,55 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
 
   // Click a Day row to toggle just that day's DC rows.
   table.querySelectorAll('tr.day-row').forEach(tr => {
-    tr.addEventListener('click', () => {
+    tr.addEventListener('click', async () => {
       const a = tr.getAttribute('data-age');
       const tgt = tr.getAttribute('data-target');
       const caret = document.getElementById('caret-' + tgt + '-' + a);
-      const rows = table.querySelectorAll('.loc-of-' + tgt + '-' + a);
+      let rows = table.querySelectorAll('.loc-of-' + tgt + '-' + a);
+
+      // Some backends' getTrend response doesn't carry dc_liability (older
+      // deployments group only by date/pivot/ageing). In that case the DC rows
+      // built from the trend response are missing or unnamed — so fetch the
+      // breakdown on demand from the drill-down endpoint, which groups by
+      // dc_liability explicitly and therefore always has the DC names.
+      const needsFetch = !rows.length ||
+        (rows.length === 1 && rows[0].getAttribute('data-dc') === LEGACY_DC_LABEL);
+
+      if (needsFetch) {
+        if (caret) caret.textContent = '…';
+        const filters = Object.assign({}, activeFilterParams(direction), {
+          pivot: bucket, aging_after_bag_received: a
+        });
+        let groups = [];
+        try {
+          const dd = await fetchDrilldown(direction, 'dc_liability', filters);
+          groups = dd.groups || [];
+        } catch (e) { /* fall through to whatever we already had */ }
+
+        if (groups.length) {
+          const frag = [];
+          groups.forEach(g => {
+            const name = normVal(g.value) || LEGACY_DC_LABEL;
+            let html = '<tr class="loc-row loc-of-' + tgt + '-' + a + '" data-dc="' + escapeAttr(name) + '">';
+            html += '<td class="sticky-col loc-cell">' + escapeHtml(name) + '</td>';
+            allDates.forEach(d => {
+              const rr = (g.rows || []).find(x => x.base_date === d);
+              const v = rr ? rr.count : 0;
+              html += '<td>' + (v ? fmtInt(v) : '') + '</td>';
+            });
+            html += '<td>' + fmtInt(g.total) + '</td></tr>';
+            frag.push(html);
+          });
+          // replace any existing placeholder rows for this day
+          Array.prototype.slice.call(rows).forEach(r => r.parentNode.removeChild(r));
+          tr.insertAdjacentHTML('afterend', frag.join(''));
+          rows = table.querySelectorAll('.loc-of-' + tgt + '-' + a);
+          rows.forEach(r => { r.style.display = 'none'; });
+        }
+        if (caret) caret.textContent = '▸';
+        rows = table.querySelectorAll('.loc-of-' + tgt + '-' + a);
+      }
+
       if (!rows.length) return;
       const nowHidden = rows[0].style.display === 'none';
       rows.forEach(r => { r.style.display = nowHidden ? '' : 'none'; });
@@ -3120,7 +3164,7 @@ async function renderLhDashboard() {
         allDates.reduce((s2, d) => s2 + dcGrid[a][y][d], 0) - allDates.reduce((s2, d) => s2 + dcGrid[a][x][d], 0));
       dcNames.forEach(dc => {
         const dcTot = allDates.reduce((s2, d) => s2 + dcGrid[a][dc][d], 0);
-        tbody += `<tr class="loc-row lhloc-${safeKey}-${a}"${autoExpand ? '' : ' style="display:none;"'}>`;
+        tbody += `<tr class="loc-row lhloc-${safeKey}-${a}" data-dc="${escapeAttr(dc)}"${autoExpand ? '' : ' style="display:none;"'}>`;
         tbody += `<td class="sticky-col loc-cell drill-dc" data-dc="${escapeAttr(dc)}" title="Click for movement type breakdown">${escapeHtml(dc)}</td>`;
         allDates.forEach(d => tbody += `<td>${dcGrid[a][dc][d] ? fmtInt(dcGrid[a][dc][d]) : ''}</td>`);
         tbody += `<td>${fmtInt(dcTot)}</td></tr>`;
@@ -3139,10 +3183,53 @@ async function renderLhDashboard() {
       el.innerHTML = thead + tbody + tfoot;
       // expand/collapse a single Day
       el.querySelectorAll('tr.day-row').forEach(tr => {
-        tr.addEventListener('click', () => {
+        tr.addEventListener('click', async () => {
           const a = tr.getAttribute('data-age');
           const caret = document.getElementById('lhcaret-' + safeKey + '-' + a);
-          const rws = el.querySelectorAll('.lhloc-' + safeKey + '-' + a);
+          let rws = el.querySelectorAll('.lhloc-' + safeKey + '-' + a);
+
+          // Same on-demand fallback as the floor tables: if the stored rows
+          // came back without dc_liability, fetch the breakdown from the
+          // drill-down endpoint, which always groups by it explicitly.
+          const needsFetch = !rws.length ||
+            (rws.length === 1 && rws[0].getAttribute('data-dc') === LEGACY_DC_LABEL);
+          if (needsFetch) {
+            if (caret) caret.innerHTML = '&hellip;';
+            const filters = Object.assign({}, lhActiveFilters(), {
+              lh_flow: t.flow, lh_category: t.category, intransit_ageing: a
+            });
+            let groups = [];
+            try {
+              const dd = await fetchDrilldown('LH', 'dc_liability', filters);
+              groups = dd.groups || [];
+            } catch (e) { /* keep whatever we have */ }
+            if (groups.length) {
+              const frag = [];
+              groups.forEach(g => {
+                const name = normVal(g.value) || LEGACY_DC_LABEL;
+                let h = '<tr class="loc-row lhloc-' + safeKey + '-' + a + '" data-dc="' + escapeAttr(name) + '" style="display:none;">';
+                h += '<td class="sticky-col loc-cell drill-dc" data-dc="' + escapeAttr(name) + '">' + escapeHtml(name) + '</td>';
+                allDates.forEach(d => {
+                  const rr = (g.rows || []).find(x => x.base_date === d);
+                  h += '<td>' + (rr && rr.count ? fmtInt(rr.count) : '') + '</td>';
+                });
+                h += '<td>' + fmtInt(g.total) + '</td></tr>';
+                frag.push(h);
+              });
+              Array.prototype.slice.call(rws).forEach(r => r.parentNode.removeChild(r));
+              tr.insertAdjacentHTML('afterend', frag.join(''));
+              el.querySelectorAll('.lhloc-' + safeKey + '-' + a + ' .drill-dc').forEach(td => {
+                td.addEventListener('click', ev => {
+                  ev.stopPropagation();
+                  state.lhDrill[t.key] = [{ groupBy: 'dc_liability', value: td.getAttribute('data-dc') }];
+                  renderLhDrilldown(t);
+                });
+              });
+            }
+            if (caret) caret.innerHTML = '&#9656;';
+            rws = el.querySelectorAll('.lhloc-' + safeKey + '-' + a);
+          }
+
           if (!rws.length) return;
           const nowHidden = rws[0].style.display === 'none';
           rws.forEach(r => { r.style.display = nowHidden ? '' : 'none'; });
