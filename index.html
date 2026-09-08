@@ -353,6 +353,8 @@ table.pivot-table tr.day-row:hover td { background: #e4efe8; }
 .chk-dd-item input { cursor: pointer; margin: 0; }
 .chk-dd-all { font-weight: 600; }
 .chk-dd-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+td.drill-dc { cursor: pointer; color: var(--green-dark); }
+td.drill-dc:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -2067,6 +2069,10 @@ function showChartError(box, msg) {
 // Exception: when BOTH a Region and an Ageing day are selected, the relevant
 // day's DC breakdown is auto-expanded, since that is exactly the "which DCs
 // in this region, at this ageing" question the filters are asking.
+// Rows stored before dc_liability existed carry no DC. Label them clearly so
+// it is obvious the data needs re-uploading, rather than showing "(blank)".
+const LEGACY_DC_LABEL = '(no DC — uploaded before DC-liability, re-upload to populate)';
+
 function renderTable(direction, bucket, bucketTrendRows, allDates) {
   const safeId = (direction + '-' + bucket).replace(/[^a-zA-Z0-9]/g, '_');
   const table = document.getElementById('table-' + safeId);
@@ -2090,7 +2096,7 @@ function renderTable(direction, bucket, bucketTrendRows, allDates) {
     const a = Number(r.aging_after_bag_received);
     if (!dayGrid[a] || dayGrid[a][r.base_date] === undefined) return;
     const c = Number(r.count) || 0;
-    const loc = normVal(r.dc_liability) || '(blank)';
+    const loc = normVal(r.dc_liability) || LEGACY_DC_LABEL;
     dayGrid[a][r.base_date] += c;
     if (!locGrid[a][loc]) { locGrid[a][loc] = {}; allDates.forEach(d => locGrid[a][loc][d] = 0); }
     locGrid[a][loc][r.base_date] += c;
@@ -3035,31 +3041,70 @@ async function renderLhDashboard() {
 
   LH_TABLES.forEach(t => {
     const sub = rows.filter(r => String(r.lh_flow) === t.flow && String(r.lh_category) === t.category);
-    const grid = {}; let tot = 0;
+
+    // Same shape as the Forward/Reverse tables: a "Day N" total row per
+    // in-transit ageing day, with its DC-liability breakdown collapsed
+    // underneath and revealed on click.
+    const ageDays = [];
+    for (let d = LH_AGE_RANGE[0]; d <= LH_AGE_RANGE[1]; d++) ageDays.push(d);
+
+    const dayGrid = {}, dcGrid = {};
+    ageDays.forEach(a => { dayGrid[a] = {}; dcGrid[a] = {}; allDates.forEach(d => dayGrid[a][d] = 0); });
+    const grid = {};            // DC -> date -> count (used by the chart)
+    let tot = 0;
     sub.forEach(r => {
-      const g = normVal(r.dc_liability) || '(blank)';
-      if (!grid[g]) { grid[g] = {}; allDates.forEach(d => grid[g][d] = 0); }
-      grid[g][r.base_date] += Number(r.count) || 0;
-      tot += Number(r.count) || 0;
+      const a = Number(r.intransit_ageing);
+      if (!dayGrid[a]) return;
+      const dc = normVal(r.dc_liability) || LEGACY_DC_LABEL;
+      const c = Number(r.count) || 0;
+      dayGrid[a][r.base_date] = (dayGrid[a][r.base_date] || 0) + c;
+      if (!dcGrid[a][dc]) { dcGrid[a][dc] = {}; allDates.forEach(d => dcGrid[a][dc][d] = 0); }
+      dcGrid[a][dc][r.base_date] += c;
+      if (!grid[dc]) { grid[dc] = {}; allDates.forEach(d => grid[dc][d] = 0); }
+      grid[dc][r.base_date] += c;
+      tot += c;
     });
     const keys = Object.keys(grid).sort((a, b) =>
       allDates.reduce((s2, d) => s2 + grid[b][d], 0) - allDates.reduce((s2, d) => s2 + grid[a][d], 0));
 
-    let thead = `<thead><tr><th class="sticky-col">DC Liability</th>`;
+    const safeKey = t.key;
+    const regionSel = (state.filters.LH || {}).region && state.filters.LH.region !== 'All';
+    const ageSel = (state.filters.LH || {}).intransit_ageing;
+    const autoExpand = !!(regionSel && !ageSelectionIsAll(ageSel));
+
+    let thead = '<thead><tr><th class="sticky-col">Dates</th>';
     allDates.forEach(d => thead += `<th title="${escapeAttr(d)}">${escapeHtml(fmtDisplayDate(d))}</th>`);
     thead += '<th>Total</th></tr></thead>';
 
     const colTot = {}; allDates.forEach(d => colTot[d] = 0);
     let tbody = '<tbody>';
-    keys.forEach(g => {
-      const rowTot = allDates.reduce((s2, d) => s2 + grid[g][d], 0);
-      if (!rowTot) return;
-      tbody += `<tr class="drill-row" data-value="${escapeAttr(g)}" title="Click for movement type breakdown">`;
-      tbody += `<td class="sticky-col"><span class="drill-caret">&#9656;</span> ${escapeHtml(g)}</td>`;
-      allDates.forEach(d => { colTot[d] += grid[g][d]; tbody += `<td>${grid[g][d] ? fmtInt(grid[g][d]) : ''}</td>`; });
-      tbody += `<td><strong>${fmtInt(rowTot)}</strong></td></tr>`;
+    ageDays.forEach(a => {
+      const dayTotal = allDates.reduce((s2, d) => s2 + (dayGrid[a][d] || 0), 0);
+      if (!dayTotal) return;
+      const dcNames = Object.keys(dcGrid[a]).filter(dc =>
+        allDates.reduce((s2, d) => s2 + dcGrid[a][dc][d], 0) > 0);
+      tbody += `<tr class="day-row" data-age="${a}" data-target="${safeKey}">`;
+      tbody += `<td class="sticky-col"><span class="day-caret" id="lhcaret-${safeKey}-${a}">${autoExpand ? '&#9662;' : '&#9656;'}</span> Day ${a}`;
+      tbody += ` <span class="dc-hint">${dcNames.length} DC${dcNames.length === 1 ? '' : 's'}</span></td>`;
+      allDates.forEach(d => {
+        const v = dayGrid[a][d] || 0;
+        colTot[d] += v;
+        tbody += `<td>${v ? fmtInt(v) : ''}</td>`;
+      });
+      tbody += `<td><strong>${fmtInt(dayTotal)}</strong></td></tr>`;
+
+      dcNames.sort((x, y) =>
+        allDates.reduce((s2, d) => s2 + dcGrid[a][y][d], 0) - allDates.reduce((s2, d) => s2 + dcGrid[a][x][d], 0));
+      dcNames.forEach(dc => {
+        const dcTot = allDates.reduce((s2, d) => s2 + dcGrid[a][dc][d], 0);
+        tbody += `<tr class="loc-row lhloc-${safeKey}-${a}"${autoExpand ? '' : ' style="display:none;"'}>`;
+        tbody += `<td class="sticky-col loc-cell drill-dc" data-dc="${escapeAttr(dc)}" title="Click for movement type breakdown">${escapeHtml(dc)}</td>`;
+        allDates.forEach(d => tbody += `<td>${dcGrid[a][dc][d] ? fmtInt(dcGrid[a][dc][d]) : ''}</td>`);
+        tbody += `<td>${fmtInt(dcTot)}</td></tr>`;
+      });
     });
     tbody += '</tbody>';
+
     let tfoot = '<tfoot><tr><td class="sticky-col">Grand Total</td>';
     allDates.forEach(d => tfoot += `<td>${fmtInt(colTot[d])}</td>`);
     tfoot += `<td>${fmtInt(tot)}</td></tr></tfoot>`;
@@ -3069,9 +3114,23 @@ async function renderLhDashboard() {
     const el = document.getElementById('lhtable-' + t.key);
     if (el) {
       el.innerHTML = thead + tbody + tfoot;
-      el.querySelectorAll('tr.drill-row').forEach(tr => {
+      // expand/collapse a single Day
+      el.querySelectorAll('tr.day-row').forEach(tr => {
         tr.addEventListener('click', () => {
-          state.lhDrill[t.key] = [{ groupBy: 'dc_liability', value: tr.getAttribute('data-value') }];
+          const a = tr.getAttribute('data-age');
+          const caret = document.getElementById('lhcaret-' + safeKey + '-' + a);
+          const rws = el.querySelectorAll('.lhloc-' + safeKey + '-' + a);
+          if (!rws.length) return;
+          const nowHidden = rws[0].style.display === 'none';
+          rws.forEach(r => { r.style.display = nowHidden ? '' : 'none'; });
+          if (caret) caret.innerHTML = nowHidden ? '&#9662;' : '&#9656;';
+        });
+      });
+      // clicking a DC name drills into movement type -> lane
+      el.querySelectorAll('.drill-dc').forEach(td => {
+        td.addEventListener('click', ev => {
+          ev.stopPropagation();
+          state.lhDrill[t.key] = [{ groupBy: 'dc_liability', value: td.getAttribute('data-dc') }];
           renderLhDrilldown(t);
         });
       });
