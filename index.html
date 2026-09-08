@@ -316,6 +316,43 @@ table.pivot-table tr.day-row { cursor: pointer; }
 table.pivot-table tr.day-row:hover td { background: #e4efe8; }
 .day-caret { color: var(--green); font-size: 10px; display: inline-block; width: 10px; }
 .dc-hint { color: var(--text-dim); font-weight: 400; font-size: 11px; margin-left: 6px; }
+
+/* ---------- Checkbox dropdown (multi-select ageing) ---------- */
+.chk-dd { position: relative; display: inline-block; min-width: 170px; }
+.chk-dd-btn {
+  width: 100%;
+  background: #ffffff;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  text-align: left;
+}
+.chk-dd-btn:hover { border-color: var(--green); }
+.chk-dd-caret { color: var(--text-dim); font-size: 10px; }
+.chk-dd-panel {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(16, 40, 26, 0.14);
+  padding: 6px;
+  max-height: 260px; overflow-y: auto;
+  min-width: 100%;
+  white-space: nowrap;
+}
+.chk-dd-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 4px;
+  font-size: 13px; cursor: pointer; color: var(--text);
+}
+.chk-dd-item:hover { background: #eef7f1; }
+.chk-dd-item input { cursor: pointer; margin: 0; }
+.chk-dd-all { font-weight: 600; }
+.chk-dd-sep { height: 1px; background: var(--border); margin: 4px 2px; }
 </style>
 </head>
 <body>
@@ -1553,23 +1590,82 @@ function ageMatches(sel, value) {
   if (!set) return true;
   return !!set[String(value)];
 }
-// Renders a native multi-select for ageing days.
-function buildAgeMultiSelect(id, options, selected) {
+// Renders a dropdown whose panel contains checkboxes — one per ageing day,
+// plus an "All" option. Closed state shows a summary ("All Ageing",
+// "Day 3", "Day 2, 3, 4" or "4 days selected"), so it reads like a normal
+// filter control rather than a scrolling list box.
+function buildAgeCheckDropdown(id, options, selected) {
   const set = ageSelectionSet(selected);
-  let html = '<select id="' + id + '" multiple size="4" class="age-multi">';
-  html += '<option value="All"' + (set ? '' : ' selected') + '>All Ageing</option>';
+  const chosen = options.filter(o => set && set[String(o)]);
+  let label;
+  if (!set || !chosen.length) label = 'All Ageing';
+  else if (chosen.length <= 3) label = 'Day ' + chosen.join(', ');
+  else label = chosen.length + ' days selected';
+
+  let html = '<div class="chk-dd" id="' + id + '">';
+  html += '<button type="button" class="chk-dd-btn" data-role="toggle">' +
+          '<span class="chk-dd-label">' + escapeHtml(label) + '</span>' +
+          '<span class="chk-dd-caret">&#9662;</span></button>';
+  html += '<div class="chk-dd-panel" hidden>';
+  html += '<label class="chk-dd-item chk-dd-all"><input type="checkbox" value="All"' +
+          (!set ? ' checked' : '') + '> All Ageing</label>';
+  html += '<div class="chk-dd-sep"></div>';
   options.forEach(o => {
-    html += '<option value="' + escapeAttr(o) + '"' + (set && set[String(o)] ? ' selected' : '') + '>Day ' + escapeHtml(String(o)) + '</option>';
+    const on = set && set[String(o)];
+    html += '<label class="chk-dd-item"><input type="checkbox" value="' + escapeAttr(o) + '"' +
+            (on ? ' checked' : '') + '> Day ' + escapeHtml(String(o)) + '</label>';
   });
-  html += '</select>';
+  html += '</div></div>';
   return html;
 }
-// Reads the chosen values out of a multi-select.
-function readAgeMultiSelect(el) {
-  if (!el) return 'All';
-  const vals = Array.prototype.slice.call(el.selectedOptions || []).map(o => o.value);
-  if (!vals.length || vals.indexOf('All') !== -1) return 'All';
-  return vals;
+
+// Wires a checkbox dropdown. onChange receives 'All' or an array of values.
+function wireAgeCheckDropdown(id, onChange) {
+  const root = document.getElementById(id);
+  if (!root) return;
+  const btn = root.querySelector('[data-role="toggle"]');
+  const panel = root.querySelector('.chk-dd-panel');
+  const labelEl = root.querySelector('.chk-dd-label');
+  const allBox = root.querySelector('.chk-dd-all input');
+  const dayBoxes = Array.prototype.slice.call(root.querySelectorAll('.chk-dd-item input'))
+    .filter(i => i.value !== 'All');
+
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    // close any other open dropdown first
+    document.querySelectorAll('.chk-dd-panel').forEach(p => { if (p !== panel) p.hidden = true; });
+    panel.hidden = !panel.hidden;
+  });
+  panel.addEventListener('click', e => e.stopPropagation());
+
+  function currentSelection() {
+    const on = dayBoxes.filter(b => b.checked).map(b => b.value);
+    return on.length ? on : 'All';
+  }
+  function refreshLabel() {
+    const on = dayBoxes.filter(b => b.checked).map(b => b.value);
+    allBox.checked = on.length === 0;
+    labelEl.textContent = !on.length ? 'All Ageing'
+      : (on.length <= 3 ? 'Day ' + on.join(', ') : on.length + ' days selected');
+  }
+
+  allBox.addEventListener('change', () => {
+    if (allBox.checked) dayBoxes.forEach(b => { b.checked = false; });
+    refreshLabel();
+    onChange('All');
+  });
+  dayBoxes.forEach(b => b.addEventListener('change', () => {
+    refreshLabel();
+    onChange(currentSelection());
+  }));
+}
+
+// One global handler closes any open checkbox dropdown on an outside click.
+if (typeof document !== 'undefined' && !window.__chkDdBound) {
+  window.__chkDdBound = true;
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.chk-dd-panel').forEach(p => { p.hidden = true; });
+  });
 }
 
 function activeFilterParams(direction) {
@@ -2382,7 +2478,7 @@ function refreshFilterUI(direction) {
   const [lo, hi] = AGE_RANGE[direction];
   const ageOptions = []; for (let d = lo; d <= hi; d++) ageOptions.push(d);
   const ageSel = document.getElementById('filter-aging-' + direction);
-  if (ageSel) ageSel.outerHTML = buildAgeMultiSelect('filter-aging-' + direction, ageOptions, f.aging_after_bag_received);
+  if (ageSel) ageSel.outerHTML = buildAgeCheckDropdown('filter-aging-' + direction, ageOptions, f.aging_after_bag_received);
 
   const locSel = document.getElementById('filter-dc-' + direction);
   if (locSel) locSel.outerHTML = buildSelect('filter-dc-' + direction, opts.dc_liability || [], f.dc_liability, 'All DCs');
@@ -2404,8 +2500,10 @@ function rewireFilterInputs(direction) {
   const pivotSel = document.getElementById('filter-pivot-' + direction);
   if (pivotSel) pivotSel.onchange = (e) => { state.filters[direction].pivot = e.target.value; renderDashboard(direction); };
 
-  const ageSel = document.getElementById('filter-aging-' + direction);
-  if (ageSel) ageSel.onchange = (e) => { state.filters[direction].aging_after_bag_received = readAgeMultiSelect(e.target); renderDashboard(direction); };
+  wireAgeCheckDropdown('filter-aging-' + direction, sel => {
+    state.filters[direction].aging_after_bag_received = sel;
+    renderDashboard(direction);
+  });
 
   const locSel = document.getElementById('filter-dc-' + direction);
   if (locSel) locSel.onchange = (e) => { state.filters[direction].dc_liability = e.target.value; renderDashboard(direction); };
@@ -2909,6 +3007,9 @@ async function renderLhDashboard() {
       <div class="empty-icon">&#8644;</div><h3>No LH In-Transit Data</h3>
       <p>Upload an LH in-transit base file to see trends here.</p></div>`;
     const k = document.getElementById('kpi-LH'); if (k) k.innerHTML = '';
+    // Still build the filter controls so the ageing checkbox dropdown exists
+    // (and looks consistent) even before any LH data has been uploaded.
+    refreshLhFilterUI();
     return;
   }
 
@@ -3165,7 +3266,7 @@ function refreshLhFilterUI() {
   set('filter-lh-MM_origin', opts.MM_origin || [], f.MM_origin, 'All MM Origins');
   set('filter-lh-MM_destination', opts.MM_destination || [], f.MM_destination, 'All MM Destinations');
   const ageEl = document.getElementById('filter-lh-intransit_ageing');
-  if (ageEl) ageEl.outerHTML = buildAgeMultiSelect('filter-lh-intransit_ageing', ages, f.intransit_ageing);
+  if (ageEl) ageEl.outerHTML = buildAgeCheckDropdown('filter-lh-intransit_ageing', ages, f.intransit_ageing);
   set('filter-lh-region', opts.region || [], f.region, 'All Regions');
 
   const drawer = document.getElementById('drawer-LH');
@@ -3177,8 +3278,10 @@ function refreshLhFilterUI() {
     const el = document.getElementById('filter-lh-' + k);
     if (el) el.onchange = e => { state.filters.LH[k] = e.target.value; renderLhDashboard(); };
   });
-  const ageSel2 = document.getElementById('filter-lh-intransit_ageing');
-  if (ageSel2) ageSel2.onchange = e => { state.filters.LH.intransit_ageing = readAgeMultiSelect(e.target); renderLhDashboard(); };
+  wireAgeCheckDropdown('filter-lh-intransit_ageing', sel => {
+    state.filters.LH.intransit_ageing = sel;
+    renderLhDashboard();
+  });
 }
 
 function wireLh() {
