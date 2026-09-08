@@ -432,6 +432,7 @@ table.pivot-table tr.day-row:hover td { background: #e4efe8; }
   <div class="status-banner" id="status-LH"></div>
   <div class="filter-bar">
     <div class="filter-item"><label>DC Liability</label><select id="filter-lh-dc_liability"></select></div>
+    <div class="filter-item"><label>Region</label><select id="filter-lh-region"></select></div>
     <div class="filter-item"><label>MM Origin</label><select id="filter-lh-MM_origin"></select></div>
     <div class="filter-item"><label>MM Destination</label><select id="filter-lh-MM_destination"></select></div>
     <div class="filter-item"><label>In-Transit Ageing</label><select id="filter-lh-intransit_ageing"></select></div>
@@ -579,17 +580,17 @@ const LH_COLUMNS = [
   'Lane Code', 'MM_Status', 'flag', 'intransit_ageing', 'Volumetric_flag', 'client_tag'
 ];
 const LH_REQUIRED_COLUMNS = ['MM_origin', 'MM_destination', 'flag', 'intransit_ageing'];
-const LH_AGE_RANGE = [1, 30];
+const LH_AGE_RANGE = [1, 20];
 
 // Dimensions stored in the LH trend summary (counts only, same as floor).
 const LH_TREND_DIMENSIONS = [
-  'lh_flow', 'lh_category', 'dc_liability',
+  'lh_flow', 'lh_category', 'dc_liability', 'region',
   'MM_origin', 'MM_destination', 'Zone', 'movement_type', 'Lane Code',
   'MM_origin_type', 'MM_destination_type', 'MM_Status', 'Volumetric_flag', 'client_tag'
 ];
 // Same rule for LH: only the dimensions stored in LH_TREND_DIMENSIONS.
 const LH_DRAWER_FIELDS = [
-  { key: 'Zone', label: 'Zone' },
+  { key: 'Zone', label: 'Zone (from file — unreliable)' },
   { key: 'movement_type', label: 'Movement Type' },
   { key: 'MM_origin_type', label: 'MM Origin Type' },
   { key: 'MM_destination_type', label: 'MM Destination Type' },
@@ -604,6 +605,87 @@ const LH_DRAWER_FIELDS = [
 //   "DC as MM Destination" -> rows where MM_destination_type = MM; DC liability = MM_destination
 // A single row can qualify on both sides, in which case it is counted once
 // under each category (with the corresponding DC as the liable party).
+// ---------------------------------------------------------------------------
+// DC -> REGION MAPPING
+// The Zone column in the LH base file is unreliable, so region is derived here
+// from the DC that carries the liability. Names are matched loosely (case,
+// spaces vs underscores) because the floor files use "Chennai_DC" while the
+// LH file uses "Chennai DC".
+// ---------------------------------------------------------------------------
+const DC_REGION_MAP = {
+  "NCR Tauru DC": "NCR Region",
+  "OneNCR DC": "NCR Region",
+  "Jaipur DC": "North/West 2",
+  "Patna DC": "North",
+  "Kolkata 2 DC": "East",
+  "Bangalore DC": "South",
+  "Nagpur DC": "West",
+  "Ludhiana DC": "North",
+  "NCR Bilaspur DC": "NCR Region",
+  "Lucknow DC": "North",
+  "Surat DC": "North/West 2",
+  "Ahmedabad DC": "North/West 2",
+  "NCR Bamnoli DC": "NCR Region",
+  "Hyderabad DC": "East",
+  "Mumbai DC": "West",
+  "Chennai DC": "South",
+  "Pune DC": "West",
+  "Indore DC": "West",
+  "NCR_Bamnoli_Large DC": "NCR Region",
+  "Kolkata DC": "East",
+  "Mysore DC": "South",
+  "Varanasi DC": "North",
+  "Siliguri DC": "East",
+  "Vijayawada DC": "East",
+  "Kochi DC": "South",
+  "Bangalore XD DC": "South",
+  "Karimnagar DC": "East",
+  "Guwahati DC": "East",
+  "Madurai DC": "South",
+  "Bhopal DC": "West",
+  "Bhubneshwar DC": "East",
+  "Akola DC": "West",
+  "NCR_Tauru_Large DC": "NCR Region",
+  "Trichy DC": "South",
+  "Ranchi DC": "East",
+  "Hubli DC": "South",
+  "Gorakhpur DC": "North",
+  "Kozhikode DC": "South",
+  "Coimbatore DC": "South",
+  "Visakhapatnam DC": "East",
+  "Rajahmundry DC": "East",
+  "Raipur DC": "West",
+  "Moradabad DC": "North",
+  "Kanpur DC": "North",
+  "Purnia DC": "East",
+  "CCU_Large DC": "East",
+  "Jammu DC": "North",
+  "Aurangabad DC": "West",
+  "Udaipur DC": "West",
+  "Sambalpur DC": "East",
+  "Jodhpur DC": "West",
+  "Silchar DC": "East",
+  "Sagar DC": "West",
+  "Dibrugarh DC": "East",
+  "AkolaTH DC": "West",
+  "Srinagar DC": "North"
+};
+
+const DC_REGION_LOOKUP = (function () {
+  const m = {};
+  Object.keys(DC_REGION_MAP).forEach(k => { m[dcRegionKey(k)] = DC_REGION_MAP[k]; });
+  return m;
+})();
+function dcRegionKey(name) {
+  return String(name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+}
+// Region for a DC name; '' when the DC isn't in the mapping.
+function regionForDc(dcName) {
+  const k = dcRegionKey(dcName);
+  if (!k) return '';
+  return DC_REGION_LOOKUP[k] || '';
+}
+
 const LH_CAT_ORIGIN = 'DC as MM origin';
 const LH_CAT_DEST = 'DC as MM Destination';
 
@@ -614,8 +696,13 @@ const LH_CAT_DEST = 'DC as MM Destination';
 // Per the latest instruction, MM_origin_type is "all": a row contributes to
 // the origin category regardless of its origin type, as long as MM_origin has
 // a value. The destination side still requires a DC-type value.
-const LH_ORIGIN_TYPE_VALUES = null;             // "all"
-const LH_DESTINATION_TYPE_VALUES = ['DC', 'MM']; // set to null for "all"
+// Both sides must be of type "MM": the point is to measure how much
+// in-transit pendency ORIGINATES from an MM and how much is RECEIVING at an
+// MM. A single shipment can qualify on both (an MM-to-MM connection), in
+// which case it is counted once under each — both MMs are liable for their
+// own side.
+const LH_ORIGIN_TYPE_VALUES = ['MM'];
+const LH_DESTINATION_TYPE_VALUES = ['MM'];
 
 // The four tables: Forward/Reverse x the two categories. All are keyed on
 // dc_liability, which already resolves to MM_origin or MM_destination.
@@ -932,10 +1019,18 @@ function processLhRow(baseDate, row, hmap) {
 
   const out = [];
   if (base.MM_origin && typeQualifies(base.MM_origin_type, LH_ORIGIN_TYPE_VALUES)) {
-    out.push(Object.assign({}, base, { lh_category: LH_CAT_ORIGIN, dc_liability: base.MM_origin }));
+    out.push(Object.assign({}, base, {
+      lh_category: LH_CAT_ORIGIN,
+      dc_liability: base.MM_origin,
+      region: regionForDc(base.MM_origin)   // region follows the liable DC
+    }));
   }
   if (base.MM_destination && typeQualifies(base.MM_destination_type, LH_DESTINATION_TYPE_VALUES)) {
-    out.push(Object.assign({}, base, { lh_category: LH_CAT_DEST, dc_liability: base.MM_destination }));
+    out.push(Object.assign({}, base, {
+      lh_category: LH_CAT_DEST,
+      dc_liability: base.MM_destination,
+      region: regionForDc(base.MM_destination)
+    }));
   }
   return out;
 }
@@ -996,7 +1091,7 @@ const state = {
   filters: {
     Forward: { pivot: 'All', aging_after_bag_received: 'All', dc_liability: 'All', awb_search: '' },
     Reverse: { pivot: 'All', aging_after_bag_received: 'All', dc_liability: 'All', awb_search: '' },
-    LH: { dc_liability: 'All', MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' }
+    LH: { dc_liability: 'All', region: 'All', MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' }
   },
   drawerOpen: { Forward: false, Reverse: false, LH: false },
   // Drill-down navigation stack per direction. Each entry:
@@ -1436,11 +1531,52 @@ function dimensionLabel(dim) {
   return dim;
 }
 
+// ---------------------------------------------------------------------------
+// Multi-select ageing
+// The ageing filter accepts a SET of days (e.g. Day 2,3,4,5) rather than one.
+// 'All' (or an empty selection) means no ageing restriction. Ageing is applied
+// client-side against the already-aggregated trend rows, so the backend
+// contract is unchanged and no extra round trip is needed.
+// ---------------------------------------------------------------------------
+function ageSelectionIsAll(sel) {
+  return !sel || sel === 'All' || (Array.isArray(sel) && (sel.length === 0 || sel.indexOf('All') !== -1));
+}
+function ageSelectionSet(sel) {
+  if (ageSelectionIsAll(sel)) return null;
+  const arr = Array.isArray(sel) ? sel : [sel];
+  const set = {};
+  arr.forEach(v => { set[String(v)] = true; });
+  return set;
+}
+function ageMatches(sel, value) {
+  const set = ageSelectionSet(sel);
+  if (!set) return true;
+  return !!set[String(value)];
+}
+// Renders a native multi-select for ageing days.
+function buildAgeMultiSelect(id, options, selected) {
+  const set = ageSelectionSet(selected);
+  let html = '<select id="' + id + '" multiple size="4" class="age-multi">';
+  html += '<option value="All"' + (set ? '' : ' selected') + '>All Ageing</option>';
+  options.forEach(o => {
+    html += '<option value="' + escapeAttr(o) + '"' + (set && set[String(o)] ? ' selected' : '') + '>Day ' + escapeHtml(String(o)) + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+// Reads the chosen values out of a multi-select.
+function readAgeMultiSelect(el) {
+  if (!el) return 'All';
+  const vals = Array.prototype.slice.call(el.selectedOptions || []).map(o => o.value);
+  if (!vals.length || vals.indexOf('All') !== -1) return 'All';
+  return vals;
+}
+
 function activeFilterParams(direction) {
   const f = state.filters[direction];
   const params = {};
   if (f.pivot && f.pivot !== 'All') params.pivot = f.pivot;
-  if (f.aging_after_bag_received && f.aging_after_bag_received !== 'All') params.aging_after_bag_received = f.aging_after_bag_received;
+  // ageing is applied client-side (multi-select), so it is not sent to the API
   if (f.dc_liability && f.dc_liability !== 'All') params.dc_liability = f.dc_liability;
   DRAWER_FIELDS.forEach(df => {
     const v = f[df.key];
@@ -1452,10 +1588,11 @@ function activeFilterParams(direction) {
 // Refreshes state.trends[direction] from whichever source is active.
 async function refreshTrendData(direction) {
   const params = activeFilterParams(direction);
+  const ageSel = state.filters[direction].aging_after_bag_received;
   if (apiLive()) {
     try {
       const data = await apiGet('getTrend', Object.assign({ direction }, params));
-      state.trends[direction] = data.rows;
+      state.trends[direction] = (data.rows || []).filter(r => ageMatches(ageSel, r.aging_after_bag_received));
       return;
     } catch (err) {
       state.apiStatus = 'error';
@@ -1465,7 +1602,7 @@ async function refreshTrendData(direction) {
       console.error('getTrend failed for ' + direction + ':', err);
     }
   }
-  state.trends[direction] = aggregateLocalTrend(state.localRaw[direction], params);
+  state.trends[direction] = aggregateLocalTrend(state.localRaw[direction], params).filter(r => ageMatches(ageSel, r.aging_after_bag_received));
 }
 
 // Refreshes filter dropdown options + unfiltered summary KPIs. Cheaper to
@@ -1667,8 +1804,7 @@ function applyLocalFilters(direction) {
   const f = state.filters[direction];
   return state.localRaw[direction].filter(r => {
     if (f.pivot && f.pivot !== 'All' && r.pivot !== f.pivot) return false;
-    if (f.aging_after_bag_received && f.aging_after_bag_received !== 'All' &&
-        String(r.aging_after_bag_received) !== String(f.aging_after_bag_received)) return false;
+    if (!ageMatches(f.aging_after_bag_received, r.aging_after_bag_received)) return false;
     if (f.dc_liability && f.dc_liability !== 'All' && r.dc_liability !== f.dc_liability) return false;
     if (f.awb_search && f.awb_search.trim()) {
       if (!r.awb_number.toLowerCase().includes(f.awb_search.trim().toLowerCase())) return false;
@@ -2246,7 +2382,7 @@ function refreshFilterUI(direction) {
   const [lo, hi] = AGE_RANGE[direction];
   const ageOptions = []; for (let d = lo; d <= hi; d++) ageOptions.push(d);
   const ageSel = document.getElementById('filter-aging-' + direction);
-  if (ageSel) ageSel.outerHTML = buildSelect('filter-aging-' + direction, ageOptions, f.aging_after_bag_received, 'All Ageing');
+  if (ageSel) ageSel.outerHTML = buildAgeMultiSelect('filter-aging-' + direction, ageOptions, f.aging_after_bag_received);
 
   const locSel = document.getElementById('filter-dc-' + direction);
   if (locSel) locSel.outerHTML = buildSelect('filter-dc-' + direction, opts.dc_liability || [], f.dc_liability, 'All DCs');
@@ -2269,7 +2405,7 @@ function rewireFilterInputs(direction) {
   if (pivotSel) pivotSel.onchange = (e) => { state.filters[direction].pivot = e.target.value; renderDashboard(direction); };
 
   const ageSel = document.getElementById('filter-aging-' + direction);
-  if (ageSel) ageSel.onchange = (e) => { state.filters[direction].aging_after_bag_received = e.target.value; renderDashboard(direction); };
+  if (ageSel) ageSel.onchange = (e) => { state.filters[direction].aging_after_bag_received = readAgeMultiSelect(e.target); renderDashboard(direction); };
 
   const locSel = document.getElementById('filter-dc-' + direction);
   if (locSel) locSel.onchange = (e) => { state.filters[direction].dc_liability = e.target.value; renderDashboard(direction); };
@@ -2508,14 +2644,39 @@ function startLhUpload(file, baseDate) {
     reader.onload = ev => {
       try {
         const bytes = ev.target.result ? ev.target.result.byteLength : undefined;
-        let wb;
-        try {
-          // cellDates keeps date cells usable; sheetStubs preserves empty cells
-          // so a sparse sheet still yields a usable range.
-          wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array', cellDates: true, sheetStubs: true });
-        } catch (readErr) {
-          onErr('Excel file could not be parsed: ' + (readErr.message || readErr) +
-                ' — if this file is .xlsb or password-protected, re-save it as .xlsx or .csv.');
+        const mb = bytes ? (bytes / 1048576) : 0;
+        let wb = null, readErrMsg = '';
+
+        // Large .xlsx files are the main failure mode here: a 68MB workbook
+        // expands to hundreds of MB of XML, and building cell objects from it
+        // can exhaust browser memory — SheetJS then returns a workbook whose
+        // SheetNames are populated but whose Sheets map is empty.
+        // Strategy: try the cheapest parse first, then a dense-mode retry
+        // (far lower memory for big sheets). NOTE: sheetStubs is deliberately
+        // NOT used — it allocates an object per empty cell and makes OOM worse.
+        const attempts = [
+          { label: 'standard', opts: { type: 'array', cellDates: true } },
+          { label: 'dense', opts: { type: 'array', cellDates: true, dense: true } }
+        ];
+        for (let ai = 0; ai < attempts.length; ai++) {
+          try {
+            const cand = XLSX.read(new Uint8Array(ev.target.result), attempts[ai].opts);
+            const nm = (cand && cand.SheetNames) || [];
+            const gotData = nm.some(n => cand.Sheets && cand.Sheets[n]);
+            if (gotData) { wb = cand; break; }
+            readErrMsg = 'sheet contents did not load (' + attempts[ai].label + ' mode)';
+          } catch (e) {
+            readErrMsg = (e && e.message) ? e.message : String(e);
+          }
+        }
+
+        if (!wb) {
+          const sizeNote = mb >= 25
+            ? ' This file is ' + mb.toFixed(0) + ' MB. Excel files this large usually exhaust browser memory before they can be read.'
+            : '';
+          onErr('Could not read the Excel file: ' + readErrMsg + '.' + sizeNote +
+                ' Please re-save the "base" tab as CSV and upload that — the CSV reader streams the file and handles very large exports comfortably.' +
+                (mb ? ' (file: ' + mb.toFixed(1) + ' MB)' : ''));
           return;
         }
         const res = readWorkbookPreferringBase(wb, LH_COLUMNS, LH_REQUIRED_COLUMNS);
@@ -2700,7 +2861,10 @@ function initTabs() {
 function lhActiveFilters() {
   const f = state.filters.LH || {};
   const out = {};
-  ['dc_liability', 'MM_origin', 'MM_destination', 'intransit_ageing'].forEach(k => {
+  // intransit_ageing is deliberately NOT sent to the server: it is a
+  // multi-select and is applied client-side by lhApplyAgeFilter(). Passing an
+  // array here would be stringified into a value that matches nothing.
+  ['dc_liability', 'region', 'MM_origin', 'MM_destination'].forEach(k => {
     if (f[k] && f[k] !== 'All') out[k] = f[k];
   });
   LH_DRAWER_FIELDS.forEach(df => { if (f[df.key] && f[df.key] !== 'All') out[df.key] = f[df.key]; });
@@ -2726,12 +2890,18 @@ async function fetchLhRows() {
   return aggregateLhTrend(recs);
 }
 
+// Applies the client-side ageing multi-select to LH rows.
+function lhApplyAgeFilter(rows) {
+  const sel = (state.filters.LH || {}).intransit_ageing;
+  return (rows || []).filter(r => ageMatches(sel, r.intransit_ageing));
+}
+
 // Renders the four LH tables: Forward/Reverse x MM origin/destination.
 // Rows = the grouped entity, columns = dates, values = AWB counts.
 async function renderLhDashboard() {
   const container = document.getElementById('sections-LH');
   if (!container) return;
-  const rows = await fetchLhRows();
+  const rows = lhApplyAgeFilter(await fetchLhRows());
   state.trends.LH = rows;
 
   if (!rows.length) {
@@ -2757,6 +2927,7 @@ async function renderLhDashboard() {
         <h3>${escapeHtml(t.title)}</h3>
         <span class="bucket-count" id="lhcount-${t.key}">0</span>
       </div>
+      <div class="chart-box"><canvas id="lhchart-${t.key}"></canvas></div>
       <div class="table-scroll"><table class="pivot-table" id="lhtable-${t.key}"></table></div>
       <div class="drilldown-panel" id="lhdrill-${t.key}"></div>
     </div>`).join('');
@@ -2792,6 +2963,8 @@ async function renderLhDashboard() {
     allDates.forEach(d => tfoot += `<td>${fmtInt(colTot[d])}</td>`);
     tfoot += `<td>${fmtInt(tot)}</td></tr></tfoot>`;
 
+    renderLhChart(t, sub, allDates, grid, keys);
+
     const el = document.getElementById('lhtable-' + t.key);
     if (el) {
       el.innerHTML = thead + tbody + tfoot;
@@ -2813,6 +2986,91 @@ async function renderLhDashboard() {
 // LH drill-down: DC liability -> movement type -> lane.
 // Works off the same aggregated rows already in state.trends.LH, so it needs
 // no extra round trip and keeps working after raw data is gone.
+// Draws the trend line for one LH table. Mirrors the floor dashboard: a
+// single series normally, and when a Region is selected, one line per DC in
+// that region plus a dotted region average.
+function renderLhChart(t, sub, allDates, grid, keys) {
+  const canvas = document.getElementById('lhchart-' + t.key);
+  if (!canvas) return;
+  const key = 'lh-' + t.key;
+  if (state.charts[key]) { try { state.charts[key].destroy(); } catch (e) {} state.charts[key] = null; }
+
+  const regionSelected = (state.filters.LH || {}).region && state.filters.LH.region !== 'All';
+  const palette = ['#17b26a', '#d97706', '#2563eb', '#c53a2e', '#8b5cf6', '#0e9488', '#e11d48', '#65a30d', '#0891b2', '#9333ea'];
+  let datasets;
+
+  if (regionSelected && keys.length) {
+    // one line per DC in the selected region
+    datasets = keys.slice(0, 12).map((g, i) => {
+      const c = palette[i % palette.length];
+      return {
+        label: g,
+        data: allDates.map(d => grid[g][d] || 0),
+        borderColor: c, backgroundColor: c + '22', fill: false,
+        tension: 0.25, pointRadius: 2, pointHoverRadius: 5, borderWidth: 1.5, spanGaps: true
+      };
+    });
+    const avg = allDates.map(d => {
+      const vals = keys.map(g => grid[g][d] || 0);
+      return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
+    });
+    datasets.push({
+      label: 'Region Average', data: avg, borderColor: '#111827',
+      backgroundColor: 'transparent', borderDash: [6, 4], fill: false,
+      tension: 0.25, pointRadius: 3, borderWidth: 2
+    });
+  } else {
+    const totals = {};
+    allDates.forEach(d => totals[d] = 0);
+    sub.forEach(r => { totals[r.base_date] = (totals[r.base_date] || 0) + Number(r.count || 0); });
+    const color = palette[LH_TABLES.findIndex(x => x.key === t.key) % palette.length];
+    const single = allDates.length < 2;
+    datasets = [{
+      label: t.title, data: allDates.map(d => totals[d] || 0),
+      borderColor: color, backgroundColor: color + '33', fill: true,
+      tension: 0.25, pointRadius: single ? 6 : 4, pointHoverRadius: single ? 8 : 6,
+      pointBackgroundColor: color, borderWidth: 2, spanGaps: true
+    }];
+  }
+
+  const draw = () => {
+    const box = canvas.parentElement;
+    if (!box) return;
+    const cssW = Math.max(box.clientWidth || 0, 300);
+    const cssH = Math.max(box.clientHeight || 0, 260);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.round(cssW);
+    canvas.height = Math.round(cssH);
+    if (typeof Chart === 'undefined') { showChartError(box, 'Chart library failed to load.'); return; }
+    let ctx;
+    try { ctx = canvas.getContext('2d'); } catch (e) { showChartError(box, 'Chart could not initialise.'); return; }
+    if (!ctx) { showChartError(box, 'Chart could not initialise.'); return; }
+    try {
+      state.charts[key] = new Chart(ctx, {
+        type: 'line',
+        data: { labels: allDates.map(fmtDisplayDate), datasets: datasets },
+        options: {
+          responsive: false, maintainAspectRatio: false, devicePixelRatio: dpr, animation: false,
+          plugins: {
+            legend: { display: !!regionSelected, position: 'bottom', labels: { boxWidth: 12, font: { size: 10 }, color: '#5f7268' } },
+            tooltip: { callbacks: { title: items => items.length ? allDates[items[0].dataIndex] : '' } }
+          },
+          scales: {
+            x: { grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268' } },
+            y: { beginAtZero: true, grid: { color: '#e2e9e5' }, ticks: { color: '#5f7268', precision: 0 } }
+          }
+        }
+      });
+    } catch (e) { showChartError(box, 'Chart failed to render: ' + (e.message || e)); }
+  };
+  let drawn = false;
+  const once = () => { if (drawn) return; drawn = true; draw(); };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(once));
+  setTimeout(once, 60);
+}
+
 function renderLhDrilldown(t) {
   const panel = document.getElementById('lhdrill-' + t.key);
   if (!panel) return;
@@ -2893,7 +3151,7 @@ function renderLhDrilldown(t) {
 function refreshLhFilterUI() {
   const src = state.localRaw.LH.length ? state.localRaw.LH : state.trends.LH;
   const opts = {};
-  ['dc_liability', 'MM_origin', 'MM_destination'].concat(LH_DRAWER_FIELDS.map(f => f.key)).forEach(k => {
+  ['dc_liability', 'region', 'MM_origin', 'MM_destination'].concat(LH_DRAWER_FIELDS.map(f => f.key)).forEach(k => {
     opts[k] = Array.from(new Set(src.map(r => r[k]).filter(v => v !== undefined && v !== ''))).sort();
   });
   const ages = Array.from(new Set(src.map(r => r.intransit_ageing).filter(v => v !== undefined && v !== ''))).sort((a, b) => a - b);
@@ -2906,17 +3164,21 @@ function refreshLhFilterUI() {
   set('filter-lh-dc_liability', opts.dc_liability || [], f.dc_liability, 'All DCs');
   set('filter-lh-MM_origin', opts.MM_origin || [], f.MM_origin, 'All MM Origins');
   set('filter-lh-MM_destination', opts.MM_destination || [], f.MM_destination, 'All MM Destinations');
-  set('filter-lh-intransit_ageing', ages, f.intransit_ageing, 'All Ageing');
+  const ageEl = document.getElementById('filter-lh-intransit_ageing');
+  if (ageEl) ageEl.outerHTML = buildAgeMultiSelect('filter-lh-intransit_ageing', ages, f.intransit_ageing);
+  set('filter-lh-region', opts.region || [], f.region, 'All Regions');
 
   const drawer = document.getElementById('drawer-LH');
   if (drawer) drawer.innerHTML = LH_DRAWER_FIELDS.map(df => `
     <div class="filter-field"><label>${escapeHtml(df.label)}</label>
     ${buildSelect('filter-lh-' + df.key, opts[df.key] || [], f[df.key], 'All')}</div>`).join('');
 
-  ['dc_liability', 'MM_origin', 'MM_destination', 'intransit_ageing'].concat(LH_DRAWER_FIELDS.map(d => d.key)).forEach(k => {
+  ['dc_liability', 'region', 'MM_origin', 'MM_destination'].concat(LH_DRAWER_FIELDS.map(d => d.key)).forEach(k => {
     const el = document.getElementById('filter-lh-' + k);
     if (el) el.onchange = e => { state.filters.LH[k] = e.target.value; renderLhDashboard(); };
   });
+  const ageSel2 = document.getElementById('filter-lh-intransit_ageing');
+  if (ageSel2) ageSel2.onchange = e => { state.filters.LH.intransit_ageing = readAgeMultiSelect(e.target); renderLhDashboard(); };
 }
 
 function wireLh() {
@@ -2929,7 +3191,7 @@ function wireLh() {
   });
   const clear = document.getElementById('clear-filters-LH');
   if (clear) clear.addEventListener('click', () => {
-    state.filters.LH = { dc_liability: 'All', MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' };
+    state.filters.LH = { dc_liability: 'All', region: 'All', MM_origin: 'All', MM_destination: 'All', intransit_ageing: 'All' };
     LH_DRAWER_FIELDS.forEach(d => state.filters.LH[d.key] = 'All');
     refreshLhFilterUI(); renderLhDashboard();
   });
