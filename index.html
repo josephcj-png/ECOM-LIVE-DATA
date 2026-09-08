@@ -1138,6 +1138,7 @@ const state = {
   // Empty = showing the top-level pivot summary only.
   drilldown: { Forward: [], Reverse: [], LH: [] },
   lhDrill: {},
+  suppressLoadedBanner: false,
   charts: {}
 };
 
@@ -1714,7 +1715,10 @@ async function refreshFilterOptionsAndSummary(direction) {
       ]);
       state.filterOptions[direction] = filters;
       state.summary[direction] = summary;
-      if (summary && summary.datesCovered > 0) {
+      // Only announce "loaded from Sheets" on the initial page load. Running
+      // this after an upload would overwrite that upload's own status —
+      // including any warning it needed to show.
+      if (summary && summary.datesCovered > 0 && !state.suppressLoadedBanner) {
         setStatus(direction, `Loaded ${summary.datesCovered} day(s) of stored data from Google Sheets (latest: ${fmtDisplayDate(summary.latestBaseDate)}).`, 'success');
       }
       return;
@@ -2597,7 +2601,9 @@ async function finishUpload(direction, file, buffer, totalRows) {
     } catch (err) {
       setStatus(direction, `Saved locally, but could not sync to Google Sheets: ${err.message}`, 'error');
     }
+    state.suppressLoadedBanner = true;
     await refreshFilterOptionsAndSummary(direction);
+    state.suppressLoadedBanner = false;
     refreshFilterUI(direction);
   } else {
     setStatus(direction, `Done: "${file.name}" — ${fmtInt(buffer.length)} pendency records loaded from ${fmtInt(totalRows)} rows. (Local only — configure the API URL in Settings to persist this.)`, 'success');
@@ -2631,6 +2637,23 @@ async function syncUploadToApi(direction, baseDate, buffer, file, totalRows) {
   if (trendRows.length === 0) {
     await apiPost('uploadTrends', { direction, baseDate, trends: [], mode: 'replace' });
   }
+
+  // --- Verify the backend actually kept the columns we sent -------------
+  // A deployed Code.gs older than the dc_liability change silently drops that
+  // column on write, which shows up much later as blank DC names. Read one
+  // row back and say so plainly rather than letting it fail quietly.
+  try {
+    const check = await apiGet('getTrend', { direction: direction, base_date: baseDate });
+    const sample = (check.rows || [])[0];
+    const sentDc = trendRows.some(r => r.dc_liability);
+    if (sample && sentDc && !sample.dc_liability) {
+      setStatus(direction,
+        `Uploaded, but your Apps Script is out of date: it stored the rows WITHOUT the "dc_liability" column, ` +
+        `so DC names will show as blank. Paste the latest Code.gs, run setupSpreadsheet(), then ` +
+        `Deploy → Manage deployments → New version → Deploy, and re-upload this file.`, 'error');
+      return;
+    }
+  } catch (e) { /* verification is best-effort — never block a good upload */ }
 
   setStatus(direction, `Done: "${file.name}" — ${fmtInt(trendRows.length)} count rows stored for ${fmtDisplayDate(baseDate)} (from ${fmtInt(totalRows)} rows, ${fmtInt(buffer.length)} pendency records).`, 'success');
 }
